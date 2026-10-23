@@ -27,6 +27,7 @@ function issueToken(user, allowedMenus) {
 const loginLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   max: parseInt(process.env.LOGIN_RATE_LIMIT || '10', 10),
+  skipSuccessfulRequests: true, // only failed logins count toward the limit
   standardHeaders: true,
   legacyHeaders: false,
   message: { error: 'Too many login attempts. Please try again later.' }

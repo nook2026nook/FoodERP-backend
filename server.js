@@ -7,6 +7,10 @@ const { pool } = require('./db');
 
 const app = express();
 
+// Behind Render's proxy: trust one hop so req.ip is the caller, not the proxy
+// (otherwise every client shares one rate-limit bucket).
+if (process.env.NODE_ENV === 'production') app.set('trust proxy', 1);
+
 // Security middleware
 app.use(helmet());
 app.use(cors({
