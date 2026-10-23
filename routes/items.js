@@ -79,6 +79,17 @@ router.delete('/:id', requireEdit('ingredients_hub'), async (req, res, next) => 
     if (used.rows[0].n > 0) {
       return res.status(409).json({ error: 'Item has received lots — delete the lots first or deactivate the item' });
     }
+    const recipes = await req.db.query(
+      `SELECT DISTINCT r.name FROM recipes r
+         WHERE r.id IN (SELECT recipe_id FROM recipe_items WHERE item_id = $1
+                        UNION SELECT recipe_id FROM recipe_packaging_bom WHERE packaging_id = $1)
+         ORDER BY r.name`,
+      [req.params.id]
+    );
+    if (recipes.rows.length) {
+      const names = recipes.rows.map(r => r.name).join(', ');
+      return res.status(409).json({ error: `Item is used in recipe(s): ${names}. Remove it from them first, or deactivate the item.` });
+    }
     await req.db.query('DELETE FROM master_items WHERE id = $1', [req.params.id]);
     await logAudit(req.db, req.user.id, 'DELETE', 'master_item', req.params.id, before.rows[0], null, req.ip);
     res.json({ message: 'Item deleted' });
