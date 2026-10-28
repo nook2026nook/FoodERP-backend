@@ -5,7 +5,7 @@ const config = require('../config');
 const { authenticate, requireAdmin, requireMenuAccess, requireEdit } = require('../middleware/auth');
 const { logAudit } = require('../utils/audit');
 const qboClient = require('../utils/qboClient');
-const { syncInvoices, applyMappings } = require('../utils/qboSync');
+const { syncInvoices, applyMappings, configuredStartDate, setStartDate } = require('../utils/qboSync');
 
 const router = express.Router();
 const STATE_TTL_MS = 10 * 60 * 1000;
@@ -59,6 +59,7 @@ router.get('/status', requireMenuAccess('shipping'), async (req, res, next) => {
       realm_id: conn?.realm_id || null,
       refresh_expires_at: conn?.refresh_token_expires_at || null,
       last_sync_at: conn?.last_sync_at || null,
+      sync_start_date: await configuredStartDate(req.db),
       last_sync_summary: summary.rows[0] ? JSON.parse(summary.rows[0].value) : null,
       open_lines: open.rows[0]
     });
@@ -95,6 +96,21 @@ router.post('/sync-invoices', requireEdit('shipping'), async (req, res, next) =>
       created: summary.created, unmapped: summary.unmapped, removed: summary.removed, errors: summary.errors.length
     }, req.ip);
     res.json(summary);
+  } catch (e) { handleError(e, res, next); }
+});
+
+// PUT /api/qbo/sync-start-date (admin) — only invoices dated on/after this are pulled.
+router.put('/sync-start-date', requireAdmin, async (req, res, next) => {
+  try {
+    const d = z.object({
+      start_date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'Use YYYY-MM-DD').nullable(),
+      remove_earlier: z.boolean().optional().default(false)
+    }).parse(req.body);
+    const before = await configuredStartDate(req.db);
+    const result = await setStartDate(req.db, d.start_date, { removeEarlier: d.remove_earlier, userId: req.user.id });
+    await logAudit(req.db, req.user.id, 'UPDATE', 'qbo_sync_start_date', null,
+      { start_date: before }, { start_date: result.start_date, removed: result.removed }, req.ip);
+    res.json(result);
   } catch (e) { handleError(e, res, next); }
 });
 

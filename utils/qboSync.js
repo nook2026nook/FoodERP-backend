@@ -1,7 +1,8 @@
 /**
  * Pull QuickBooks invoices into shipments (PROMPT.md Phase 4).
  *
- * - Since the last successful sync (first run: QBO_SYNC_START_DATE or 30 days back).
+ * - Since the last successful sync (first run: the "sync from" date, else 30 days back).
+ * - Invoices dated before the "sync from" date (admin setting or QBO_SYNC_START_DATE) are never pulled.
  * - Paged with STARTPOSITION / MAXRESULTS.
  * - One transaction per invoice; one failure is logged and the sync carries on.
  * - Idempotent per invoice LINE (unique shipment_id + qbo_line_id): running twice adds nothing.
@@ -25,10 +26,18 @@ function isVoided(inv) {
   return /voided/i.test(inv.PrivateNote || '') && Number(inv.TotalAmt) === 0;
 }
 
-function firstSyncDate() {
-  const configured = process.env.QBO_SYNC_START_DATE;
-  if (configured && /^\d{4}-\d{2}-\d{2}$/.test(configured)) return configured;
-  return new Date(Date.now() - 30 * 24 * 3600 * 1000).toISOString().slice(0, 10);
+const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+const START_DATE_KEY = 'qbo_sync_start_date';
+
+/** The "sync invoices from" date: admin setting, else QBO_SYNC_START_DATE, else null (no cut-off). */
+async function configuredStartDate(db) {
+  const { rows } = await db.query('SELECT value FROM app_settings WHERE key = $1', [START_DATE_KEY]);
+  const value = rows[0]?.value || process.env.QBO_SYNC_START_DATE;
+  return value && DATE_RE.test(value) ? value : null;
+}
+
+function firstSyncDate(startDate) {
+  return startDate || new Date(Date.now() - 30 * 24 * 3600 * 1000).toISOString().slice(0, 10);
 }
 
 async function pagedQuery(qbo, where) {
@@ -128,12 +137,13 @@ async function syncInvoices(db, qbo, { userId = null } = {}) {
   }
 
   // Fetch what changed.
+  const startDate = await configuredStartDate(db);
   let invoices;
   let mode;
   const last = conn.last_sync_at ? new Date(conn.last_sync_at) : null;
   if (!last) {
-    mode = `first sync from ${firstSyncDate()}`;
-    invoices = await pagedQuery(qbo, `TxnDate >= '${firstSyncDate()}'`);
+    mode = `first sync from ${firstSyncDate(startDate)}`;
+    invoices = await pagedQuery(qbo, `TxnDate >= '${firstSyncDate(startDate)}'`);
   } else {
     const since = new Date(last.getTime() - OVERLAP_MS);
     if (startedAt - since < CDC_WINDOW_MS) {
@@ -146,12 +156,18 @@ async function syncInvoices(db, qbo, { userId = null } = {}) {
   }
 
   const summary = {
-    mode, invoices: invoices.length, created: 0, skipped: 0, unmapped: 0, partial: 0, removed: 0,
-    errors: [], notes: []
+    mode, start_date: startDate, invoices: invoices.length, created: 0, skipped: 0, unmapped: 0, partial: 0,
+    removed: 0, before_start: 0, errors: [], notes: []
   };
 
   for (const inv of invoices) {
     const label = inv.DocNumber || `QBO-${inv.Id}`;
+    // Change data capture also returns older invoices that were edited; ignore those dated
+    // before the cut-off. Deletions and voids still go through (they only touch stored invoices).
+    if (startDate && inv.status !== 'Deleted' && !isVoided(inv) && inv.TxnDate < startDate) {
+      summary.before_start++;
+      continue;
+    }
     try {
       await withTransaction(async (client) => {
         if (inv.status === 'Deleted') {
@@ -216,4 +232,35 @@ async function applyMappings(db, userId) {
   return result;
 }
 
-module.exports = { syncInvoices, applyMappings, isVoided };
+/**
+ * Set (or clear, with null) the "sync invoices from" date. The sync clock is reset so the next
+ * run reads every invoice from that date. With removeEarlier, QuickBooks invoices already synced
+ * and dated before it are removed and their stock returns.
+ */
+async function setStartDate(db, date, { removeEarlier = false, userId = null } = {}) {
+  if (date) {
+    await db.query(
+      `INSERT INTO app_settings (key, value) VALUES ($1, $2)
+       ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()`,
+      [START_DATE_KEY, date]
+    );
+  } else {
+    await db.query('DELETE FROM app_settings WHERE key = $1', [START_DATE_KEY]);
+  }
+  await db.query('UPDATE qbo_auth_tokens SET last_sync_at = NULL');
+
+  let removed = 0;
+  if (date && removeEarlier) {
+    const { rows } = await db.query(
+      "SELECT qbo_invoice_id FROM shipments WHERE qbo_invoice_id IS NOT NULL AND shipped_at < $1", [date]
+    );
+    for (const { qbo_invoice_id: id } of rows) {
+      await withTransaction(async (client) => {
+        if (await removeInvoice(client, id, `Dated before sync start ${date}`, userId)) removed++;
+      });
+    }
+  }
+  return { start_date: date || null, removed };
+}
+
+module.exports = { syncInvoices, applyMappings, isVoided, configuredStartDate, setStartDate };

@@ -173,6 +173,36 @@ test('status reports the connection; a clerk can see it but cannot change mappin
   expect(map.status).toBe(403);
 });
 
+test('sync start date: earlier invoices are ignored, already-synced ones can be removed', async () => {
+  const forbidden = await api().put('/api/qbo/sync-start-date').set(auth(clerk)).send({ start_date: '2026-10-01' });
+  expect(forbidden.status).toBe(403);
+  const bad = await api().put('/api/qbo/sync-start-date').set(auth(admin)).send({ start_date: '10/01/2026' });
+  expect(bad.status).toBe(400);
+
+  // INV-1 and INV-4 were shipped 2026-10-20; a start date after that removes them.
+  const set = await api().put('/api/qbo/sync-start-date').set(auth(admin)).send({ start_date: '2026-10-21', remove_earlier: true });
+  expect(set.status).toBe(200);
+  expect(set.body).toEqual({ start_date: '2026-10-21', removed: 2 });
+  expect(await lines()).toEqual([]);
+  expect((await pool.query('SELECT last_sync_at FROM qbo_auth_tokens')).rows[0].last_sync_at).toBeNull();
+
+  const book = { invoices: [invoice(5, [{ item: '10', qty: 1 }], { TxnDate: '2026-10-21' })], changed: [] };
+  const qbo = fakeQbo(book);
+  const first = await syncInvoices(pool, qbo);
+  expect(qbo.queries[0]).toContain("TxnDate >= '2026-10-21'");
+  expect(first).toMatchObject({ start_date: '2026-10-21', created: 1 });
+
+  // Change data capture returns an old invoice that was edited: it stays out.
+  const later = await syncInvoices(pool, fakeQbo({ invoices: [], changed: [invoice(6, [{ item: '10', qty: 1 }], { TxnDate: '2026-09-15' })] }));
+  expect(later).toMatchObject({ before_start: 1, created: 0 });
+  expect((await lines()).map(l => l.invoice_number)).toEqual(['INV-5']);
+
+  const status = await api().get('/api/qbo/status').set(auth(clerk));
+  expect(status.body.sync_start_date).toBe('2026-10-21');
+  const cleared = await api().put('/api/qbo/sync-start-date').set(auth(admin)).send({ start_date: null });
+  expect(cleared.body).toEqual({ start_date: null, removed: 0 });
+});
+
 test('OAuth callback rejects a missing or wrong state', async () => {
   const res = await api().get('/api/qbo/callback').query({ code: 'x', state: 'forged', realmId: '1' });
   expect(res.status).toBe(302);
