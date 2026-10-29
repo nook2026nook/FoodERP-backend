@@ -1,7 +1,8 @@
 /**
  * Pull QuickBooks invoices into shipments (PROMPT.md Phase 4).
  *
- * - Since the last successful sync (first run: the "sync from" date, else 30 days back).
+ * - Every run reads all invoices in the date range ("sync from" date, else 30 days back);
+ *   change data capture since the last sync adds the deleted ones.
  * - Invoices dated before the "sync from" date (admin setting or QBO_SYNC_START_DATE) are never pulled,
  *   nor those dated after the optional "sync to" date.
  * - Paged with STARTPOSITION / MAXRESULTS.
@@ -148,20 +149,24 @@ async function syncInvoices(db, qbo, { userId = null } = {}) {
   // Fetch what changed.
   const startDate = await configuredStartDate(db);
   const endDate = await configuredEndDate(db);
-  let invoices;
-  let mode;
+  // Every run re-reads the whole date range (lines already synced are skipped), so an invoice
+  // is never missed. Reading only "changes since last sync" lost invoices whenever change data
+  // capture didn't report them, and nothing ever read them again.
+  const from = firstSyncDate(startDate);
+  let mode = `invoices dated ${from}${endDate ? ` to ${endDate}` : ' onwards'}`;
+  const invoices = await pagedQuery(qbo, `TxnDate >= '${from}'${endDate ? ` AND TxnDate <= '${endDate}'` : ''}`);
+
+  // Deleted invoices aren't in the query; change data capture reports them (last 30 days only).
   const last = conn.last_sync_at ? new Date(conn.last_sync_at) : null;
-  if (!last) {
-    mode = `first sync from ${firstSyncDate(startDate)}${endDate ? ` to ${endDate}` : ''}`;
-    invoices = await pagedQuery(qbo, `TxnDate >= '${firstSyncDate(startDate)}'${endDate ? ` AND TxnDate <= '${endDate}'` : ''}`);
-  } else {
+  if (last) {
     const since = new Date(last.getTime() - OVERLAP_MS);
     if (startedAt - since < CDC_WINDOW_MS) {
-      mode = 'changes since last sync';
-      invoices = await qbo.changedInvoices(since.toISOString());
+      const read = new Set(invoices.map(inv => String(inv.Id)));
+      for (const inv of await qbo.changedInvoices(since.toISOString())) {
+        if (inv.status === 'Deleted' && !read.has(String(inv.Id))) invoices.push(inv);
+      }
     } else {
-      mode = 'changes since last sync (older than 30 days; deletions not detected)';
-      invoices = await pagedQuery(qbo, `MetaData.LastUpdatedTime >= '${since.toISOString()}'`);
+      mode += '; last sync over 30 days ago, deletions not detected';
     }
   }
 
@@ -172,8 +177,8 @@ async function syncInvoices(db, qbo, { userId = null } = {}) {
 
   for (const inv of invoices) {
     const label = inv.DocNumber || `QBO-${inv.Id}`;
-    // Change data capture also returns older invoices that were edited; ignore those dated
-    // outside the sync range. Deletions and voids still go through (they only touch stored invoices).
+    // Belt and braces: ignore anything dated outside the sync range. Deletions and voids still
+    // go through (they only touch stored invoices).
     if (inv.status !== 'Deleted' && !isVoided(inv)) {
       if (startDate && inv.TxnDate < startDate) { summary.before_start++; continue; }
       if (endDate && inv.TxnDate > endDate) { summary.after_end++; continue; }

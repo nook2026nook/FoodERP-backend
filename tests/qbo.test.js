@@ -105,7 +105,7 @@ test('first sync: mapped lines allocate FIFO across batches, unmapped lines are 
 });
 
 test('syncing the same invoices again creates no duplicates (idempotent per line)', async () => {
-  const book = { invoices: [], changed: [invoice(1, [{ item: '10', qty: 3 }, { item: '20', qty: 4 }])] };
+  const book = { invoices: [invoice(1, [{ item: '10', qty: 3 }, { item: '20', qty: 4 }])], changed: [] };
   const summary = await syncInvoices(pool, fakeQbo(book));
   expect(summary).toMatchObject({ created: 0, skipped: 2 });
   expect(await lines()).toHaveLength(2);
@@ -113,7 +113,7 @@ test('syncing the same invoices again creates no duplicates (idempotent per line
 });
 
 test('more boxes than released stock: allocates what exists and leaves the line partial', async () => {
-  const book = { invoices: [], changed: [invoice(2, [{ item: '10', qty: 6 }])] };
+  const book = { invoices: [invoice(2, [{ item: '10', qty: 6 }])], changed: [] };
   const summary = await syncInvoices(pool, fakeQbo(book));
   expect(summary).toMatchObject({ created: 1, partial: 1 });
   const line = (await lines()).find(l => l.invoice_number === 'INV-2');
@@ -125,7 +125,7 @@ test('one bad invoice is logged without stopping the others; the clock does not 
   const before = (await pool.query('SELECT last_sync_at FROM qbo_auth_tokens')).rows[0].last_sync_at;
   const bad = invoice(3, [{ item: '10', qty: 1 }], { TxnDate: 'not-a-date' });
   const good = invoice(4, [{ item: '20', qty: 1 }]);
-  const summary = await syncInvoices(pool, fakeQbo({ invoices: [], changed: [bad, good] }));
+  const summary = await syncInvoices(pool, fakeQbo({ invoices: [bad, good], changed: [] }));
   expect(summary.errors).toHaveLength(1);
   expect(summary.errors[0].invoice).toBe('INV-3');
   expect(summary.created).toBe(1);
@@ -138,6 +138,17 @@ test('invoices deleted in QuickBooks are removed and their stock returns', async
   expect(summary.removed).toBe(1);
   expect(await boxesLeft(ids.new)).toBe(4);
   expect((await lines()).some(l => l.invoice_number === 'INV-2')).toBe(false);
+});
+
+test('every sync re-reads the date range: an invoice missed earlier still arrives', async () => {
+  const missed = invoice(8, [{ item: '20', qty: 1 }]);
+  // Change data capture reports nothing (and edits it returns are not trusted to add invoices).
+  const qbo = fakeQbo({ invoices: [missed], changed: [missed] });
+  const summary = await syncInvoices(pool, qbo);
+  expect(qbo.queries[0]).toMatch(/^SELECT \* FROM Invoice WHERE TxnDate >= /);
+  expect(summary).toMatchObject({ invoices: 1, created: 1 });
+  expect((await lines()).some(l => l.invoice_number === 'INV-8')).toBe(true);
+  await pool.query("DELETE FROM shipments WHERE invoice_number = 'INV-8'");
 });
 
 test('mapping an item later allocates the lines that were waiting for it', async () => {
@@ -192,8 +203,8 @@ test('sync start date: earlier invoices are ignored, already-synced ones can be 
   expect(qbo.queries[0]).toContain("TxnDate >= '2026-10-21'");
   expect(first).toMatchObject({ start_date: '2026-10-21', created: 1 });
 
-  // Change data capture returns an old invoice that was edited: it stays out.
-  const later = await syncInvoices(pool, fakeQbo({ invoices: [], changed: [invoice(6, [{ item: '10', qty: 1 }], { TxnDate: '2026-09-15' })] }));
+  // An invoice dated before the start date stays out even if QuickBooks returns it.
+  const later = await syncInvoices(pool, fakeQbo({ invoices: [invoice(6, [{ item: '10', qty: 1 }], { TxnDate: '2026-09-15' })], changed: [] }));
   expect(later).toMatchObject({ before_start: 1, created: 0 });
   expect((await lines()).map(l => l.invoice_number)).toEqual(['INV-5']);
 
@@ -218,7 +229,7 @@ test('sync to date: later invoices are ignored; it cannot come before the from d
   await syncInvoices(pool, qbo);
   expect(qbo.queries[0]).toContain("TxnDate >= '2026-10-01' AND TxnDate <= '2026-10-25'");
 
-  const later = await syncInvoices(pool, fakeQbo({ invoices: [], changed: [invoice(7, [{ item: '10', qty: 1 }], { TxnDate: '2026-11-02' })] }));
+  const later = await syncInvoices(pool, fakeQbo({ invoices: [invoice(7, [{ item: '10', qty: 1 }], { TxnDate: '2026-11-02' })], changed: [] }));
   expect(later).toMatchObject({ after_end: 1, created: 0 });
 
   await api().put('/api/qbo/sync-start-date').set(auth(admin)).send({ start_date: null });
