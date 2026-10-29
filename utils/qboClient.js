@@ -104,6 +104,11 @@ async function accessToken(db) {
     try {
       refreshed = (await oauthClient().refreshUsingToken(decrypt(row.refresh_token_enc))).getJson();
     } catch (e) {
+      // invalid_grant: the connection was revoked (e.g. disconnected inside QuickBooks). Forget it
+      // so the panel shows "not connected" and offers Connect again.
+      if (/invalid_grant/i.test(`${e.error || ''} ${e.message || ''} ${JSON.stringify(e.authResponse?.json || '')}`)) {
+        await tx.query('DELETE FROM qbo_auth_tokens WHERE realm_id = $1', [row.realm_id]);
+      }
       throw qboError(409, 'QuickBooks refused to refresh the connection; reconnect QuickBooks');
     }
     await saveTokens(tx, row.realm_id, refreshed);
@@ -112,13 +117,18 @@ async function accessToken(db) {
 }
 
 /** GET a QuickBooks API path (relative to /v3/company/{realm}). */
-async function apiGet(db, path, params = {}) {
+async function apiGet(db, path, params = {}, retried = false) {
   const { realmId, token } = await accessToken(db);
   const base = API_BASE[config.qbo.environment === 'production' ? 'production' : 'sandbox'];
   const url = new URL(`${base}/v3/company/${realmId}${path}`);
   for (const [k, v] of Object.entries({ ...params, minorversion: MINOR_VERSION })) url.searchParams.set(k, v);
   const res = await fetch(url, { headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' } });
   const body = await res.json().catch(() => ({}));
+  // Access token rejected before its stated expiry: mark it expired and retry once with a refresh.
+  if (res.status === 401 && !retried) {
+    await db.query('UPDATE qbo_auth_tokens SET access_token_expires_at = NOW() WHERE realm_id = $1', [realmId]);
+    return apiGet(db, path, params, true);
+  }
   if (!res.ok) {
     const detail = body?.Fault?.Error?.[0];
     throw qboError(res.status === 401 ? 409 : 502,

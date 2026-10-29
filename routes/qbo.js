@@ -5,7 +5,7 @@ const config = require('../config');
 const { authenticate, requireAdmin, requireMenuAccess, requireEdit } = require('../middleware/auth');
 const { logAudit } = require('../utils/audit');
 const qboClient = require('../utils/qboClient');
-const { syncInvoices, applyMappings, configuredStartDate, setStartDate } = require('../utils/qboSync');
+const { syncInvoices, applyMappings, configuredStartDate, configuredEndDate, setStartDate } = require('../utils/qboSync');
 
 const router = express.Router();
 const STATE_TTL_MS = 10 * 60 * 1000;
@@ -40,6 +40,13 @@ router.get('/callback', async (req, res) => {
   }
 });
 
+// Intuit opens these in the user's browser (app Launch / Connect / Disconnect URLs in the
+// Intuit Developer portal, or the app card in QuickBooks). A browser visit carries no JWT, so
+// without these it hit `authenticate` and showed {"error":"Authentication required"}.
+// They only send the user to the app; connecting and disconnecting still need an admin login.
+router.get(['/launch', '/connect'], (req, res) => res.redirect(backToApp({ qbo: 'launch' })));
+router.get('/disconnect', (req, res) => res.redirect(backToApp({ qbo: 'disconnected' })));
+
 router.use(authenticate);
 
 // GET /api/qbo/status — connection, last sync and how many lines need attention.
@@ -60,6 +67,7 @@ router.get('/status', requireMenuAccess('shipping'), async (req, res, next) => {
       refresh_expires_at: conn?.refresh_token_expires_at || null,
       last_sync_at: conn?.last_sync_at || null,
       sync_start_date: await configuredStartDate(req.db),
+      sync_end_date: await configuredEndDate(req.db),
       last_sync_summary: summary.rows[0] ? JSON.parse(summary.rows[0].value) : null,
       open_lines: open.rows[0]
     });
@@ -99,17 +107,24 @@ router.post('/sync-invoices', requireEdit('shipping'), async (req, res, next) =>
   } catch (e) { handleError(e, res, next); }
 });
 
-// PUT /api/qbo/sync-start-date (admin) — only invoices dated on/after this are pulled.
+// PUT /api/qbo/sync-start-date (admin) — only invoices dated on/after start_date (and, if set,
+// on/before end_date) are pulled.
 router.put('/sync-start-date', requireAdmin, async (req, res, next) => {
   try {
+    const isoDate = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'Use YYYY-MM-DD');
     const d = z.object({
-      start_date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'Use YYYY-MM-DD').nullable(),
+      start_date: isoDate.nullable(),
+      end_date: isoDate.nullable().optional().default(null),
       remove_earlier: z.boolean().optional().default(false)
+    }).refine(v => !v.start_date || !v.end_date || v.end_date >= v.start_date, {
+      message: 'The "to" date must be on or after the "from" date', path: ['end_date']
     }).parse(req.body);
-    const before = await configuredStartDate(req.db);
-    const result = await setStartDate(req.db, d.start_date, { removeEarlier: d.remove_earlier, userId: req.user.id });
-    await logAudit(req.db, req.user.id, 'UPDATE', 'qbo_sync_start_date', null,
-      { start_date: before }, { start_date: result.start_date, removed: result.removed }, req.ip);
+    const before = { start_date: await configuredStartDate(req.db), end_date: await configuredEndDate(req.db) };
+    const result = await setStartDate(req.db, d.start_date, {
+      endDate: d.end_date, removeEarlier: d.remove_earlier, userId: req.user.id
+    });
+    await logAudit(req.db, req.user.id, 'UPDATE', 'qbo_sync_start_date', null, before,
+      { start_date: result.start_date, end_date: result.end_date, removed: result.removed }, req.ip);
     res.json(result);
   } catch (e) { handleError(e, res, next); }
 });

@@ -182,7 +182,7 @@ test('sync start date: earlier invoices are ignored, already-synced ones can be 
   // INV-1 and INV-4 were shipped 2026-10-20; a start date after that removes them.
   const set = await api().put('/api/qbo/sync-start-date').set(auth(admin)).send({ start_date: '2026-10-21', remove_earlier: true });
   expect(set.status).toBe(200);
-  expect(set.body).toEqual({ start_date: '2026-10-21', removed: 2 });
+  expect(set.body).toEqual({ start_date: '2026-10-21', end_date: null, removed: 2 });
   expect(await lines()).toEqual([]);
   expect((await pool.query('SELECT last_sync_at FROM qbo_auth_tokens')).rows[0].last_sync_at).toBeNull();
 
@@ -200,7 +200,40 @@ test('sync start date: earlier invoices are ignored, already-synced ones can be 
   const status = await api().get('/api/qbo/status').set(auth(clerk));
   expect(status.body.sync_start_date).toBe('2026-10-21');
   const cleared = await api().put('/api/qbo/sync-start-date').set(auth(admin)).send({ start_date: null });
-  expect(cleared.body).toEqual({ start_date: null, removed: 0 });
+  expect(cleared.body).toEqual({ start_date: null, end_date: null, removed: 0 });
+});
+
+test('sync to date: later invoices are ignored; it cannot come before the from date', async () => {
+  const backwards = await api().put('/api/qbo/sync-start-date').set(auth(admin))
+    .send({ start_date: '2026-10-10', end_date: '2026-10-01' });
+  expect(backwards.status).toBe(400);
+
+  const set = await api().put('/api/qbo/sync-start-date').set(auth(admin))
+    .send({ start_date: '2026-10-01', end_date: '2026-10-25' });
+  expect(set.body).toEqual({ start_date: '2026-10-01', end_date: '2026-10-25', removed: 0 });
+  const status = await api().get('/api/qbo/status').set(auth(clerk));
+  expect(status.body).toMatchObject({ sync_start_date: '2026-10-01', sync_end_date: '2026-10-25' });
+
+  const qbo = fakeQbo({ invoices: [], changed: [] });
+  await syncInvoices(pool, qbo);
+  expect(qbo.queries[0]).toContain("TxnDate >= '2026-10-01' AND TxnDate <= '2026-10-25'");
+
+  const later = await syncInvoices(pool, fakeQbo({ invoices: [], changed: [invoice(7, [{ item: '10', qty: 1 }], { TxnDate: '2026-11-02' })] }));
+  expect(later).toMatchObject({ after_end: 1, created: 0 });
+
+  await api().put('/api/qbo/sync-start-date').set(auth(admin)).send({ start_date: null });
+  expect((await api().get('/api/qbo/status').set(auth(clerk))).body.sync_end_date).toBeNull();
+});
+
+test('Intuit launch / disconnect URLs open the app instead of an auth error', async () => {
+  for (const [path, result] of [['/api/qbo/launch', 'launch'], ['/api/qbo/connect', 'launch'], ['/api/qbo/disconnect', 'disconnected']]) {
+    const res = await api().get(path);
+    expect(res.status).toBe(302);
+    expect(res.headers.location).toContain(`qbo=${result}`);
+  }
+  // Disconnecting still needs an admin.
+  expect((await api().post('/api/qbo/disconnect')).status).toBe(401);
+  expect((await pool.query('SELECT COUNT(*)::int AS n FROM qbo_auth_tokens')).rows[0].n).toBe(1);
 });
 
 test('OAuth callback rejects a missing or wrong state', async () => {
