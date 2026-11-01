@@ -157,8 +157,19 @@ describe('baking batch', () => {
     expect(await remaining(ids.oatsLot)).toBe(90);
   });
 
-  test('re-saving the same batch number refunds the old deduction first', async () => {
-    const res = await api().post('/api/batches/baking').set(auth(operator)).send({
+  test('a new save cannot overwrite an existing batch number, and editing by ID refunds old deductions', async () => {
+    const duplicate = await api().post('/api/batches/baking').set(auth(operator)).send({
+      batch_number: 'B-100', recipe_id: ids.recipe, bins_count: 4,
+      splits: [
+        { item_id: ids.flour, lot_id: ids.flourLot2, quantity: 20 },
+        { item_id: ids.oats, lot_id: ids.oatsLot, quantity: 10 }
+      ]
+    });
+    expect(duplicate.status).toBe(409);
+    expect(await remaining(ids.flourLot1)).toBe(10);
+    expect(await remaining(ids.flourLot2)).toBe(50);
+
+    const res = await api().put(`/api/batches/${ids.batch}/baking`).set(auth(operator)).send({
       batch_number: 'B-100', recipe_id: ids.recipe, bins_count: 4,
       splits: [
         { item_id: ids.flour, lot_id: ids.flourLot2, quantity: 20 },
@@ -310,7 +321,7 @@ describe('QA release and ready-to-ship stock', () => {
   });
 
   test('a released batch can no longer be re-baked', async () => {
-    const res = await api().post('/api/batches/baking').set(auth(operator)).send({
+    const res = await api().put(`/api/batches/${ids.batch}/baking`).set(auth(operator)).send({
       batch_number: 'B-100', recipe_id: ids.recipe, bins_count: 4,
       splits: [
         { item_id: ids.flour, lot_id: ids.flourLot2, quantity: 20 },

@@ -213,25 +213,23 @@ router.post('/plan', requireEdit('production'), async (req, res, next) => {
   } catch (e) { handleError(e, res, next); }
 });
 
-// POST /api/batches/baking — save the baking screen. Same batch number = edit:
-// the old baking deductions are refunded before the new ones are taken.
-router.post('/baking', requireEdit('production'), async (req, res, next) => {
+async function saveBaking(req, res, next, editBatchId = null) {
   try {
     const d = bakingSchema.parse(req.body);
     const result = await withTransaction(async (client) => {
       const recipe = await requireRecipe(client, d.recipe_id);
       const basis = d.scale_basis || recipe.scale_basis;
 
-      const existingId = await findBatchIdByNumber(client, d.batch_number);
-      const existing = existingId ? await loadBatch(client, existingId, { lock: true }) : null;
+      const existing = editBatchId ? await loadBatch(client, editBatchId, { lock: true }) : null;
+      if (editBatchId && !existing) throw httpError(404, 'Batch not found');
       const before = existing ? await batchDetail(client, existing.id) : null;
 
       if (existing) {
         if (!BAKING_EDITABLE.includes(existing.status)) {
-          throw httpError(409, `Batch ${d.batch_number} is ${existing.status}; its baking can no longer be changed`);
+          throw httpError(409, `Batch ${existing.batch_number} is ${existing.status}; its baking can no longer be changed`);
         }
         if (existing.recipe_id !== d.recipe_id && before.packaged_at) {
-          throw httpError(409, `Batch ${d.batch_number} is already packaged; its recipe can't be changed`);
+          throw httpError(409, `Batch ${existing.batch_number} is already packaged; its recipe can't be changed`);
         }
         await refundStage(client, existing.id, 'baking');
       }
@@ -262,11 +260,15 @@ router.post('/baking', requireEdit('production'), async (req, res, next) => {
 
       const saved = await batchDetail(client, batchId);
       await logAudit(client, req.user.id, existing ? 'UPDATE' : 'CREATE', 'production_batch', batchId, before, saved, req.ip);
-      return { saved, created: !existing };
+      return saved;
     });
-    res.status(result.created ? 201 : 200).json(result.saved);
+    res.status(editBatchId ? 200 : 201).json(result);
   } catch (e) { handleError(e, res, next); }
-});
+}
+
+// New batch numbers are always creates. Existing baking is edited by batch ID.
+router.post('/baking', requireEdit('production'), (req, res, next) => saveBaking(req, res, next));
+router.put('/:id/baking', requireEdit('production'), (req, res, next) => saveBaking(req, res, next, req.params.id));
 
 // PUT /api/batches/:id/packaging — save the packing screen; refunds previous
 // packaging deductions first. Packaging materials are deducted in their own unit.
