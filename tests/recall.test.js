@@ -89,6 +89,33 @@ describe('recall', () => {
     expect((await api().get('/api/recall/batch/NOPE').set(auth(qa))).status).toBe(404);
   });
 
+  test('traceability table: lot -> batch -> customer -> invoice, with totals', async () => {
+    const res = await api().get('/api/recall/traceability').query({ q: 'fl-42' }).set(auth(qa));
+    expect(res.status).toBe(200);
+    expect(res.body.lots_count).toBe(1);
+    expect(res.body.totals.kg).toEqual({ received: 100, used: 20, in_hand: 80 });
+    // B-1 shipped to a customer; B-2 is still in the warehouse.
+    const b1 = res.body.rows.find(r => r.batch?.batch_number === 'B-1');
+    expect(b1).toMatchObject({ used: 10, shipment: expect.objectContaining({ customer_name: 'Whole Foods', invoice_number: 'INV-77' }) });
+    const b2 = res.body.rows.find(r => r.batch?.batch_number === 'B-2');
+    expect(b2.shipment).toBeNull();
+    expect(b1.lot).toMatchObject({ lot_number: 'FL-42', item_name: 'Flour', supplier_name: 'Approved Miller' });
+  });
+
+  test('traceability search matches ingredient and supplier names; no match gives no rows', async () => {
+    const byItem = await api().get('/api/recall/traceability').query({ q: 'flou' }).set(auth(qa));
+    expect(byItem.body.lots_count).toBe(1);
+    const bySupplier = await api().get('/api/recall/traceability').query({ q: 'approved' }).set(auth(qa));
+    expect(bySupplier.body.lots_count).toBe(1);
+    const none = await api().get('/api/recall/traceability').query({ q: 'zzz%' }).set(auth(qa));
+    expect(none.body.lots_count).toBe(0);
+    expect(none.body.rows).toEqual([]);
+  });
+
+  test('a guest cannot read the traceability table', async () => {
+    expect((await api().get('/api/recall/traceability').set(auth(guest))).status).toBe(403);
+  });
+
   test('search finds lots and batches', async () => {
     const res = await api().get('/api/recall/search').query({ q: 'B-' }).set(auth(qa));
     expect(res.body.batches).toEqual(['B-1', 'B-2']);

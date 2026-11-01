@@ -13,6 +13,8 @@ const ROLE_DEFAULT_MENUS = {
 const ROLE_CAN_EDIT = {
   'ingredients_hub': ['Administrator', 'Production Operator'],
   receiving: ['Administrator', 'Production Operator'],
+  // Deleting a received lot is an Administrator action (lots feed the recall trail)
+  receiving_delete: ['Administrator'],
   recipes: ['Administrator', 'Production Operator'],
   production: ['Administrator', 'Production Operator'],
   // QA hold / release of batches (DECISIONS.md #23)

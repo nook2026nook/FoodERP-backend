@@ -16,7 +16,9 @@ const receiveSchema = z.object({
     item_id: z.string().uuid(),
     lot_number: z.string().trim().min(1).max(100),
     packs_received: z.number().positive(),
-    expiry_date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional().nullable()
+    expiry_date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional().nullable(),
+    spec_doc_name: z.string().trim().max(255).optional().nullable(),
+    spec_doc_size: z.string().trim().max(30).optional().nullable()
   })).min(1)
 });
 
@@ -37,7 +39,7 @@ router.get('/', async (req, res, next) => {
     if (activeOnly) where = 'WHERE l.remaining_quantity > 0';
     if (req.query.item_id) { params.push(req.query.item_id); where += `${where ? ' AND' : 'WHERE'} l.item_id = $${params.length}`; }
     const { rows } = await req.db.query(
-      `SELECT l.*, i.name AS item_name, i.category, i.unit_type,
+      `SELECT l.*, i.name AS item_name, i.item_code, i.category, i.unit_type,
               i.unit_pack_size, i.cost_per_pack, i.package_role,
               s.name AS supplier_name
          FROM warehouse_lots l
@@ -112,11 +114,12 @@ router.post('/receive', requireEdit('receiving'), async (req, res, next) => {
         const ins = await client.query(
           `INSERT INTO warehouse_lots
              (lot_number, item_id, supplier_id, po_number, dock_temp, packs_received,
-              total_quantity, remaining_quantity, expiry_date, received_at)
-           VALUES ($1,$2,$3,$4,$5,$6,$7,$7,$8,COALESCE($9, CURRENT_DATE))
+              total_quantity, remaining_quantity, expiry_date, received_at, spec_doc_name, spec_doc_size)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$7,$8,COALESCE($9, CURRENT_DATE),$10,$11)
            RETURNING *`,
           [line.lot_number, line.item_id, data.supplier_id, data.po_number || null, data.dock_temp || null,
-           line.packs_received, total, line.expiry_date || null, data.received_at || null]
+           line.packs_received, total, line.expiry_date || null, data.received_at || null,
+           line.spec_doc_name || null, line.spec_doc_size || null]
         );
         await logAudit(client, req.user.id, 'CREATE', 'warehouse_lot', ins.rows[0].id, null, ins.rows[0], req.ip);
         created.push({ ...ins.rows[0], item_name: i.name, unit_type: i.unit_type });
@@ -167,7 +170,7 @@ router.put('/:id', requireEdit('receiving'), async (req, res, next) => {
   }
 });
 
-router.delete('/:id', requireEdit('receiving'), async (req, res, next) => {
+router.delete('/:id', requireEdit('receiving_delete'), async (req, res, next) => {
   try {
     const before = await req.db.query('SELECT * FROM warehouse_lots WHERE id = $1', [req.params.id]);
     if (!before.rows.length) return res.status(404).json({ error: 'Lot not found' });

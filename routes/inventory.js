@@ -17,23 +17,29 @@ function handleError(e, res, next) {
   return next(e);
 }
 
-/** Outer-box material cost per recipe and format (BOM rows assigned to boxes). */
-async function outerBoxCosts(db) {
+/**
+ * Packaging material cost per recipe and format, from the BOM rows assigned to
+ * bags (per bag) and boxes (per box). The recipe's own cost is material & dough only.
+ */
+async function packagingCosts(db) {
   const { rows } = await db.query(
     `SELECT b.recipe_id, b.assignment, b.amount, b.measure, i.unit_pack_size, i.cost_per_pack
        FROM recipe_packaging_bom b JOIN master_items i ON i.id = b.packaging_id
-      WHERE b.assignment IN ('box575','box312')`
+      WHERE b.assignment IN ('bag575','bag312','box575','box312')`
   );
-  const costs = {};
+  const bag = {};
+  const box = {};
   for (const r of rows) {
-    const key = `${r.recipe_id}:${r.assignment === 'box575' ? '575g' : '312g'}`;
-    costs[key] = (costs[key] || 0) + packagingRowCost({ ...r, cost_per_unit: costPerUnit(r) });
+    const format = r.assignment.endsWith('575') ? '575g' : '312g';
+    const key = `${r.recipe_id}:${format}`;
+    const target = r.assignment.startsWith('bag') ? bag : box;
+    target[key] = (target[key] || 0) + packagingRowCost({ ...r, cost_per_unit: costPerUnit(r) });
   }
-  return costs;
+  return { bag, box };
 }
 
-// GET /api/inventory/ready-to-ship — one row per recipe with both formats and the
-// HTML's valuation: box = (bag cost x 12) + outer box cost; loose bags at bag cost.
+// GET /api/inventory/ready-to-ship — one row per recipe with both formats.
+// Valuation: a bag costs its dough cost + its bag packaging; a box is 12 bags + the outer box.
 router.get('/ready-to-ship', async (req, res, next) => {
   try {
     const { rows } = await req.db.query(
@@ -41,13 +47,14 @@ router.get('/ready-to-ship', async (req, res, next) => {
          FROM ready_to_ship_inventory v JOIN recipes r ON r.id = v.recipe_id
         ORDER BY v.recipe_name, v.format DESC`
     );
-    const boxCosts = await outerBoxCosts(req.db);
+    const pkg = await packagingCosts(req.db);
 
     const byRecipe = new Map();
     for (const r of rows) {
       const entry = byRecipe.get(r.recipe_id) || { recipe_id: r.recipe_id, recipe_name: r.recipe_name, formats: {}, total_value: 0 };
-      const bagCost = Number(r.format === '575g' ? r.cost_per_575g : r.cost_per_312g);
-      const boxCost = boxCosts[`${r.recipe_id}:${r.format}`] || 0;
+      const doughBagCost = Number(r.format === '575g' ? r.cost_per_575g : r.cost_per_312g);
+      const bagCost = doughBagCost + (pkg.bag[`${r.recipe_id}:${r.format}`] || 0);
+      const boxCost = pkg.box[`${r.recipe_id}:${r.format}`] || 0;
       const value = valueReadyToShip({ boxes: r.boxes, bags: r.bags, bagCost, boxCost });
       entry.formats[r.format] = {
         boxes: r.boxes, bags: r.bags, total_bags: r.total_bags,

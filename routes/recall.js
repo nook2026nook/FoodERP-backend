@@ -89,6 +89,92 @@ router.get('/search', async (req, res, next) => {
   } catch (e) { next(e); }
 });
 
+// GET /api/recall/traceability?q= — the end-to-end table: every matching lot with the batches
+// that used it and the customers those batches shipped to (lot -> batch -> customer -> invoice).
+// q matches lot number, item name / code or supplier; empty q = every lot (newest first, max 500).
+router.get('/traceability', async (req, res, next) => {
+  try {
+    const q = String(req.query.q || '').trim().slice(0, 100);
+    const like = `%${q.replace(/[%_\\]/g, (c) => `\\${c}`)}%`;
+    const { rows: lots } = await req.db.query(
+      `SELECT l.id AS lot_id, l.lot_number, i.name AS item_name, i.item_code, i.category, i.unit_type,
+              s.name AS supplier_name, l.po_number, l.received_at, l.expiry_date, l.spec_doc_name,
+              l.total_quantity, l.remaining_quantity
+         FROM warehouse_lots l
+         JOIN master_items i ON i.id = l.item_id
+         LEFT JOIN suppliers s ON s.id = l.supplier_id
+        WHERE $1 = '' OR l.lot_number ILIKE $2 OR i.name ILIKE $2 OR i.item_code ILIKE $2 OR s.name ILIKE $2
+        ORDER BY l.received_at DESC, l.lot_number
+        LIMIT 500`,
+      [q, like]
+    );
+
+    const lotIds = lots.map(l => l.lot_id);
+    const used = lotIds.length ? (await req.db.query(
+      `SELECT a.lot_id, a.batch_id, b.batch_number, b.production_date, b.status, r.name AS recipe_name,
+              SUM(a.quantity) AS quantity
+         FROM batch_lot_allocations a
+         JOIN production_batches b ON b.id = a.batch_id
+         JOIN recipes r ON r.id = b.recipe_id
+        WHERE a.lot_id = ANY($1::uuid[])
+        GROUP BY a.lot_id, a.batch_id, b.batch_number, b.production_date, b.status, r.name
+        ORDER BY b.production_date, b.batch_number`, [lotIds]
+    )).rows : [];
+
+    const batchIds = [...new Set(used.map(u => u.batch_id))];
+    const shipments = batchIds.length ? await downstreamShipments(req.db, batchIds) : [];
+    const shipmentsByBatch = new Map();
+    for (const s of shipments) {
+      if (!shipmentsByBatch.has(s.batch_number)) shipmentsByBatch.set(s.batch_number, []);
+      shipmentsByBatch.get(s.batch_number).push(s);
+    }
+    const usedByLot = new Map();
+    for (const u of used) {
+      if (!usedByLot.has(u.lot_id)) usedByLot.set(u.lot_id, []);
+      usedByLot.get(u.lot_id).push(u);
+    }
+
+    const rows = [];
+    for (const lot of lots) {
+      const usages = usedByLot.get(lot.lot_id) || [];
+      if (!usages.length) { rows.push({ lot, used: 0, batch: null, shipment: null }); continue; }
+      for (const u of usages) {
+        const batch = {
+          batch_number: u.batch_number, recipe_name: u.recipe_name,
+          production_date: u.production_date, status: u.status
+        };
+        const sold = shipmentsByBatch.get(u.batch_number) || [];
+        if (!sold.length) rows.push({ lot, used: Number(u.quantity), batch, shipment: null });
+        else for (const s of sold) rows.push({ lot, used: Number(u.quantity), batch, shipment: s });
+      }
+    }
+
+    // Totals per unit (kg for ingredients, units for packaging) so the two are never added together.
+    const totals = {};
+    for (const lot of lots) {
+      const t = totals[lot.unit_type] || (totals[lot.unit_type] = { received: 0, used: 0, in_hand: 0 });
+      t.received += Number(lot.total_quantity);
+      t.in_hand += Number(lot.remaining_quantity);
+    }
+    for (const u of used) {
+      const lot = lots.find(l => l.lot_id === u.lot_id);
+      totals[lot.unit_type].used += Number(u.quantity);
+    }
+
+    res.json({
+      query: q,
+      generated_at: new Date().toISOString(),
+      lots_count: lots.length,
+      batches_count: batchIds.length,
+      totals,
+      batch_usage: used.map(u => ({
+        lot_id: u.lot_id, batch_number: u.batch_number, quantity: Number(u.quantity)
+      })),
+      rows
+    });
+  } catch (e) { next(e); }
+});
+
 // GET /api/recall/batch/:batchNumber
 router.get('/batch/:batchNumber', async (req, res, next) => {
   try {

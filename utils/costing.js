@@ -1,10 +1,12 @@
 /**
  * THE single implementation of the client's recipe cost model.
- * Ported from v45 RecipesView.calculatedBatchCostData (HTML lines 1324-1397):
+ * Client's semi-final prototype (DECISIONS.md #39):
+ *   - formulation cost is material & dough only: baking ingredients + wastage + labor
  *   - wastage % applies to baking ingredient cost only
  *   - yield (575g / 312g units) comes from baking grams only
- *   - 'batch' packaging is shared across the yield; bag rows add per bag;
- *     box rows add cost / 12 per bag
+ *   - packaging is NOT part of the formulation cost or the 3-tier prices; it is costed
+ *     after the production run from what was actually packed. The per-assignment
+ *     packaging costs (bag575Cost ...) are still returned for that.
  */
 
 const ROUND = (n) => Math.round((Number(n) + Number.EPSILON) * 1e4) / 1e4;
@@ -65,11 +67,9 @@ function calculateRecipeCost(p) {
     else sharedMaterialCost += cost;
   }
 
-  const costPer575g = (units575 > 0 ? (baseBatchCost + sharedMaterialCost) / units575 : 0)
-    + bag575Cost + box575Cost / 12;
-  const costPer312g = (units312 > 0 ? (baseBatchCost + sharedMaterialCost) / units312 : 0)
-    + bag312Cost + box312Cost / 12;
-  const totalCost = baseBatchCost + sharedMaterialCost;
+  const costPer575g = units575 > 0 ? baseBatchCost / units575 : 0;
+  const costPer312g = units312 > 0 ? baseBatchCost / units312 : 0;
+  const totalCost = baseBatchCost;
 
   const mfg = Number(p.mfgMargin) || 0;
   const dist = Number(p.distMargin) || 0;
@@ -94,7 +94,7 @@ function calculateRecipeCost(p) {
     bag312Cost: ROUND(bag312Cost),
     box575Cost: ROUND(box575Cost),
     box312Cost: ROUND(box312Cost),
-    ingCost: ROUND(doughCost + sharedMaterialCost),
+    ingCost: ROUND(doughCost),
     labor: ROUND(labor),
     wastage: ROUND(wastage),
     totalCost: ROUND(totalCost),

@@ -100,7 +100,8 @@ describe('recipes', () => {
     const base = 20 + 0.5 + 150;
     expect(Number(res.body.total_baking_grams)).toBe(15000);
     expect(Number(res.body.units_575)).toBe(26);
-    expect(Number(res.body.cost_per_575g)).toBeCloseTo(base / 26 + 0.1 + 1.2 / 12, 3);
+    // formulation cost is dough + wastage + labor only; packaging is costed after the run (Decision 39)
+    expect(Number(res.body.cost_per_575g)).toBeCloseTo(base / 26, 3);
     expect(res.body.items).toHaveLength(2);
   });
 
@@ -229,6 +230,37 @@ describe('packaging', () => {
     expect(Number(res.body.total_pkg_cost)).toBe(5.4);
     expect(await remaining(ids.bagLot)).toBe(970);
     expect(await remaining(ids.boxLot)).toBe(98);
+  });
+
+  test('run cost: gross material + packaging, less ingredient wastage (decision 40)', async () => {
+    // 4 bins on a per-batch basis = 2 batches: flour 20 kg x $1, oats 10 kg x $2, wastage 2.5%.
+    const list = await api().get('/api/batches').set(auth(operator));
+    const b = list.body.find(x => x.id === ids.batch);
+    expect(b.gross_material_cost).toBeCloseTo(170.5 * 2, 3);
+    expect(b.packaging_cost).toBeCloseTo(5.4, 3);
+    expect(b.gross_production_cost).toBeCloseTo(170.5 * 2 + 5.4, 3);
+    expect(b.wastage_kg).toBeCloseTo(30 * 0.025, 3);
+    expect(b.wastage_cost).toBeCloseTo(40 * 0.025, 3);
+    expect(b.net_production_cost).toBeCloseTo(170.5 * 2 + 5.4 - 1, 3);
+
+    const live = await api().get(`/api/batches/${ids.batch}/packaging-requirements`).set(auth(operator))
+      .query({ boxes_575g: 1, bags_575g: 0, boxes_312g: 0, bags_312g: 0 });
+    expect(live.body.run_cost.packaging_cost).toBeCloseTo(0.1 * 12 + 1.2, 3);
+    expect(live.body.run_cost.net_production_cost)
+      .toBeCloseTo(170.5 * 2 + 0.1 * 12 + 1.2 - 1, 3);
+  });
+
+  test('wastage log lists ingredient wastage per batch', async () => {
+    const res = await api().get('/api/reports/wastage').set(auth(operator));
+    expect(res.status).toBe(200);
+    const b = res.body.batches.find(x => x.id === ids.batch);
+    expect(b.ingredients).toHaveLength(2);
+    const flour = b.ingredients.find(i => i.item_id === ids.flour);
+    expect(flour).toMatchObject({ used_kg: 20, cost_per_kg: 1, wastage_percent: 2.5 });
+    expect(flour.wastage_kg).toBeCloseTo(0.5, 3);
+    expect(flour.wastage_cost).toBeCloseTo(0.5, 3);
+    expect(res.body.summary.wastage_cost).toBeGreaterThan(0);
+    expect(res.body.summary.batches_audited).toBeGreaterThanOrEqual(1);
   });
 
   test('re-packing refunds the earlier packaging deduction', async () => {

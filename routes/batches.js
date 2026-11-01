@@ -5,6 +5,7 @@ const { logAudit } = require('../utils/audit');
 const { withTransaction } = require('../db');
 const { loadRecipe } = require('../utils/recipeData');
 const { varianceStatus } = require('../utils/costing');
+const { batchRunCosts, withPackagingCost } = require('../utils/batchCosts');
 const {
   bakingRequirements, packagingRequirements, yieldVariance, fifoSplit
 } = require('../utils/production');
@@ -124,7 +125,12 @@ router.get('/', async (req, res, next) => {
          LEFT JOIN batch_packaging p ON p.batch_id = b.id
         ORDER BY b.production_date DESC, b.created_at DESC`
     );
-    res.json(rows.map(b => ({ ...b, variance_status: b.packaged_at ? varianceStatus(Number(b.variance_delta_grams)) : null })));
+    const costs = await batchRunCosts(req.db, { batchIds: rows.map(b => b.id) });
+    res.json(rows.map(b => ({
+      ...b,
+      variance_status: b.packaged_at ? varianceStatus(Number(b.variance_delta_grams)) : null,
+      ...costs.get(b.id)
+    })));
   } catch (e) { next(e); }
 });
 
@@ -169,11 +175,13 @@ router.get('/:id/packaging-requirements', async (req, res, next) => {
     const recipe = await requireRecipe(req.db, batch.recipe_id);
     const pkg = packagingRequirements(recipe, batch.scale_basis, batch.bins_count, counts);
     const variance = yieldVariance(recipe, batch.scale_basis, batch.bins_count, counts);
+    const run = (await batchRunCosts(req.db, { batchIds: [batch.id] })).get(batch.id);
     res.json({
       ...variance,
       variance_status: varianceStatus(variance.variance_delta_grams),
       counts: pkg.counts,
       cost: pkg.cost,
+      run_cost: withPackagingCost(run, pkg.cost.total),
       requirements: await suggest(req.db, pkg.requirements, 'packaging', batch.id)
     });
   } catch (e) { handleError(e, res, next); }

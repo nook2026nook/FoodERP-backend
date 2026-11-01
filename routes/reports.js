@@ -3,6 +3,7 @@ const { z } = require('zod');
 const { authenticate, requireMenuAccess } = require('../middleware/auth');
 const { varianceStatus, ROUND } = require('../utils/costing');
 const { BAGS_PER_BOX } = require('../utils/production');
+const { batchRunCosts } = require('../utils/batchCosts');
 
 const router = express.Router();
 router.use(authenticate);
@@ -66,34 +67,46 @@ router.get('/shipments', requireMenuAccess('reports'), async (req, res, next) =>
   }
 });
 
-// GET /api/reports/wastage — yield variance for every packaged batch (±50 g = balanced).
+// GET /api/reports/wastage — per batch: yield variance (±50 g = balanced, packaged batches only)
+// and the ingredient wastage / run-cost reconciliation (every baked batch).
 router.get('/wastage', requireMenuAccess('wastage'), async (req, res, next) => {
   try {
     const { rows } = await req.db.query(
       `SELECT b.id, b.batch_number, r.name AS recipe_name, b.production_date, b.status,
               b.bins_count, b.scale_basis, b.theoretical_dough_grams, b.packaged_weight_grams,
               b.variance_delta_grams, b.total_pkg_cost, b.bag575_cost, b.box575_cost,
-              b.bag312_cost, b.box312_cost, b.other_pkg_cost,
+              b.bag312_cost, b.box312_cost, b.other_pkg_cost, b.packaged_at,
               p.bags_575g, p.boxes_575g, p.bags_312g, p.boxes_312g
          FROM production_batches b
          JOIN recipes r ON r.id = b.recipe_id
          LEFT JOIN batch_packaging p ON p.batch_id = b.id
-        WHERE b.packaged_at IS NOT NULL AND b.status <> 'Cancelled'
+        WHERE b.status NOT IN ('Cancelled', 'Planned')
         ORDER BY b.production_date DESC, b.batch_number`
     );
-    const batches = rows.map(b => ({ ...b, variance_status: varianceStatus(Number(b.variance_delta_grams)) }));
-    const sum = (f) => batches.reduce((a, b) => a + f(b), 0);
+    const costs = await batchRunCosts(req.db, { batchIds: rows.map(b => b.id), includeIngredients: true });
+    const batches = rows.map(b => ({
+      ...b,
+      variance_status: b.packaged_at ? varianceStatus(Number(b.variance_delta_grams)) : null,
+      ...costs.get(b.id)
+    }));
+    const packaged = batches.filter(b => b.packaged_at);
+    const sum = (list, f) => list.reduce((a, b) => a + f(b), 0);
     res.json({
       summary: {
-        batches: batches.length,
-        balanced: batches.filter(b => b.variance_status === 'Balanced').length,
-        over_yield: batches.filter(b => b.variance_status === 'Over-Yield').length,
-        scrap: batches.filter(b => b.variance_status === 'Scrap / Loss').length,
-        scrap_grams: ROUND(sum(b => Math.min(0, Number(b.variance_delta_grams)))),
-        over_grams: ROUND(sum(b => Math.max(0, Number(b.variance_delta_grams)))),
-        theoretical_grams: ROUND(sum(b => Number(b.theoretical_dough_grams))),
-        packaged_grams: ROUND(sum(b => Number(b.packaged_weight_grams))),
-        packaging_cost: ROUND(sum(b => Number(b.total_pkg_cost)))
+        batches_audited: batches.length,
+        batches: packaged.length,
+        balanced: packaged.filter(b => b.variance_status === 'Balanced').length,
+        over_yield: packaged.filter(b => b.variance_status === 'Over-Yield').length,
+        scrap: packaged.filter(b => b.variance_status === 'Scrap / Loss').length,
+        scrap_grams: ROUND(sum(packaged, b => Math.min(0, Number(b.variance_delta_grams)))),
+        over_grams: ROUND(sum(packaged, b => Math.max(0, Number(b.variance_delta_grams)))),
+        theoretical_grams: ROUND(sum(packaged, b => Number(b.theoretical_dough_grams))),
+        packaged_grams: ROUND(sum(packaged, b => Number(b.packaged_weight_grams))),
+        packaging_cost: ROUND(sum(packaged, b => Number(b.total_pkg_cost))),
+        wastage_kg: ROUND(sum(batches, b => b.wastage_kg)),
+        wastage_cost: ROUND(sum(batches, b => b.wastage_cost)),
+        gross_production_cost: ROUND(sum(batches, b => b.gross_production_cost)),
+        net_production_cost: ROUND(sum(batches, b => b.net_production_cost))
       },
       batches
     });
