@@ -30,7 +30,7 @@ async function upstreamLots(db, batchIds) {
 /** Customers who received product from the given batches. */
 async function downstreamShipments(db, batchIds) {
   const { rows } = await db.query(
-    `SELECT b.batch_number, s.shipped_at, s.customer_name, s.invoice_number, s.source, s.qbo_invoice_id,
+    `SELECT b.id AS batch_id, b.batch_number, s.shipped_at, s.customer_name, s.invoice_number, s.source, s.qbo_invoice_id,
             l.product_description, l.format, a.boxes, a.bags
        FROM shipment_allocations a
        JOIN production_batches b ON b.id = a.batch_id
@@ -61,7 +61,7 @@ async function batchesById(db, batchIds) {
        JOIN recipes r ON r.id = b.recipe_id
        LEFT JOIN batch_packaging p ON p.batch_id = b.id
       WHERE b.id = ANY($1::uuid[])
-      ORDER BY b.production_date, b.batch_number`, [batchIds]
+      ORDER BY b.production_date, b.batch_number, b.created_at, b.id`, [batchIds]
   );
   return rows;
 }
@@ -80,7 +80,7 @@ router.get('/search', async (req, res, next) => {
   try {
     const q = `%${String(req.query.q || '').trim()}%`;
     const batches = await req.db.query(
-      'SELECT batch_number FROM production_batches WHERE batch_number ILIKE $1 ORDER BY batch_number LIMIT 20', [q]
+      'SELECT DISTINCT batch_number FROM production_batches WHERE batch_number ILIKE $1 ORDER BY batch_number LIMIT 20', [q]
     );
     const lots = await req.db.query(
       `SELECT DISTINCT l.lot_number FROM warehouse_lots l WHERE l.lot_number ILIKE $1 ORDER BY l.lot_number LIMIT 20`, [q]
@@ -125,8 +125,8 @@ router.get('/traceability', async (req, res, next) => {
     const shipments = batchIds.length ? await downstreamShipments(req.db, batchIds) : [];
     const shipmentsByBatch = new Map();
     for (const s of shipments) {
-      if (!shipmentsByBatch.has(s.batch_number)) shipmentsByBatch.set(s.batch_number, []);
-      shipmentsByBatch.get(s.batch_number).push(s);
+      if (!shipmentsByBatch.has(s.batch_id)) shipmentsByBatch.set(s.batch_id, []);
+      shipmentsByBatch.get(s.batch_id).push(s);
     }
     const usedByLot = new Map();
     for (const u of used) {
@@ -143,7 +143,7 @@ router.get('/traceability', async (req, res, next) => {
           batch_number: u.batch_number, recipe_name: u.recipe_name,
           production_date: u.production_date, status: u.status
         };
-        const sold = shipmentsByBatch.get(u.batch_number) || [];
+        const sold = shipmentsByBatch.get(u.batch_id) || [];
         if (!sold.length) rows.push({ lot, used: Number(u.quantity), batch, shipment: null });
         else for (const s of sold) rows.push({ lot, used: Number(u.quantity), batch, shipment: s });
       }
@@ -179,17 +179,20 @@ router.get('/traceability', async (req, res, next) => {
 router.get('/batch/:batchNumber', async (req, res, next) => {
   try {
     const { rows } = await req.db.query(
-      'SELECT id FROM production_batches WHERE batch_number = $1', [req.params.batchNumber]
+      `SELECT id FROM production_batches WHERE batch_number = $1
+       ORDER BY production_date, created_at, id`, [req.params.batchNumber]
     );
     if (!rows.length) return res.status(404).json({ error: `No batch numbered ${req.params.batchNumber}` });
-    const ids = [rows[0].id];
-    const [batch] = await batchesById(req.db, ids);
+    const ids = rows.map(r => r.id);
+    const batches = await batchesById(req.db, ids);
+    const [batch] = batches;
     const shipments = await downstreamShipments(req.db, ids);
     const dossier = {
       mode: 'batch',
       query: req.params.batchNumber,
       generated_at: new Date().toISOString(),
       batch,
+      batches,
       upstream_lots: await upstreamLots(req.db, ids),
       shipments,
       on_hand: await onHand(req.db, ids),

@@ -189,7 +189,9 @@ async function importPrototypeBackup(client, backup, userId) {
     const number = text(raw?.batchNumber) || text(raw?.id);
     const rid = recipeId.get(String(raw?.recipeId));
     if (!number || !rid) { warnings.push(`Skipped batch ${number || '(no number)'}: its recipe is not in the backup`); bump(skipped, 'batches'); continue; }
-    const found = await client.query('SELECT id FROM production_batches WHERE batch_number = $1', [number]);
+    const found = await client.query(
+      'SELECT id FROM production_batches WHERE batch_number = $1 AND recipe_id = $2', [number, rid]
+    );
     if (found.rows[0]) { batchId.set(number, found.rows[0].id); bump(skipped, 'batches'); continue; }
 
     const recipe = await loadRecipe(client, rid);

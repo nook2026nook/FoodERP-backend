@@ -48,7 +48,7 @@ const PACKAGING_EDITABLE = ['In Production', 'Completed', 'Quality Hold'];
 function handleError(e, res, next) {
   if (e instanceof z.ZodError) return res.status(400).json({ error: 'Invalid input', details: e.errors });
   if (e.status) return res.status(e.status).json({ error: e.message });
-  if (e.code === '23505') return res.status(409).json({ error: 'That batch number is already in use' });
+  if (e.code === '23505') return res.status(409).json({ error: 'That batch number already has a record for this formulation' });
   return next(e);
 }
 
@@ -103,11 +103,6 @@ async function suggest(db, requirements, stage, batchId) {
   });
 }
 
-async function findBatchIdByNumber(db, batchNumber) {
-  const { rows } = await db.query('SELECT id FROM production_batches WHERE batch_number = $1', [batchNumber]);
-  return rows[0]?.id || null;
-}
-
 // ---------------------------------------------------------------------------
 // Reads
 // ---------------------------------------------------------------------------
@@ -134,18 +129,26 @@ router.get('/', async (req, res, next) => {
   } catch (e) { next(e); }
 });
 
-// GET /api/batches/baking-requirements?recipe_id&bins_count&scale_basis[&batch_number]
+// GET /api/batches/baking-requirements?recipe_id&bins_count&scale_basis[&batch_id]
 router.get('/baking-requirements', async (req, res, next) => {
   try {
     const q = z.object({
       recipe_id: z.string().uuid(),
       bins_count: z.coerce.number().positive(),
       scale_basis: z.enum(['batch', 'bin']).optional(),
-      batch_number: z.string().optional()
+      batch_id: z.string().uuid().optional()
     }).parse(req.query);
     const recipe = await requireRecipe(req.db, q.recipe_id);
     const basis = q.scale_basis || recipe.scale_basis;
-    const batchId = q.batch_number ? await findBatchIdByNumber(req.db, q.batch_number) : null;
+    let batchId = null;
+    if (q.batch_id) {
+      const { rows } = await req.db.query(
+        'SELECT id FROM production_batches WHERE id = $1 AND recipe_id = $2',
+        [q.batch_id, q.recipe_id]
+      );
+      if (!rows.length) throw httpError(404, 'Batch not found for this recipe');
+      batchId = rows[0].id;
+    }
     const requirements = bakingRequirements(recipe, basis, q.bins_count);
     res.json({
       scale_basis: basis,

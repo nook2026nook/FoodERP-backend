@@ -157,7 +157,7 @@ describe('baking batch', () => {
     expect(await remaining(ids.oatsLot)).toBe(90);
   });
 
-  test('a new save cannot overwrite an existing batch number, and editing by ID refunds old deductions', async () => {
+  test('batch numbers can be shared across recipes, and editing by ID refunds only that batch deductions', async () => {
     const duplicate = await api().post('/api/batches/baking').set(auth(operator)).send({
       batch_number: 'B-100', recipe_id: ids.recipe, bins_count: 4,
       splits: [
@@ -166,8 +166,38 @@ describe('baking batch', () => {
       ]
     });
     expect(duplicate.status).toBe(409);
+    expect(duplicate.body.error).toMatch(/already has a record for this formulation/i);
     expect(await remaining(ids.flourLot1)).toBe(10);
     expect(await remaining(ids.flourLot2)).toBe(50);
+
+    const { rows: recipeRows } = await pool.query(
+      "INSERT INTO recipes (name, total_baking_grams) VALUES ('Cocoa Almond', 15000) RETURNING id"
+    );
+    const otherRecipeId = recipeRows[0].id;
+    await pool.query(
+      `INSERT INTO recipe_items (recipe_id, item_id, grams_per_batch)
+       SELECT $1, item_id, grams_per_batch FROM recipe_items WHERE recipe_id = $2`,
+      [otherRecipeId, ids.recipe]
+    );
+    const sharedNumber = await api().post('/api/batches/baking').set(auth(operator)).send({
+      batch_number: 'B-100', recipe_id: otherRecipeId, bins_count: 4,
+      splits: [
+        { item_id: ids.flour, lot_id: ids.flourLot2, quantity: 20 },
+        { item_id: ids.oats, lot_id: ids.oatsLot, quantity: 10 }
+      ]
+    });
+    expect(sharedNumber.status).toBe(201);
+    expect(sharedNumber.body.batch_number).toBe('B-100');
+    expect(sharedNumber.body.recipe_id).toBe(otherRecipeId);
+    expect(sharedNumber.body.id).not.toBe(ids.batch);
+    expect(await remaining(ids.flourLot2)).toBe(30);
+    expect(await remaining(ids.oatsLot)).toBe(80);
+
+    const requirements = await api().get('/api/batches/baking-requirements').set(auth(operator))
+      .query({ recipe_id: ids.recipe, bins_count: 4, batch_id: ids.batch });
+    expect(requirements.status).toBe(200);
+    expect(requirements.body.requirements.find(r => r.item_id === ids.flour).splits)
+      .toEqual([{ lot_id: ids.flourLot1, lot_number: 'F-001', quantity: 20 }]);
 
     const res = await api().put(`/api/batches/${ids.batch}/baking`).set(auth(operator)).send({
       batch_number: 'B-100', recipe_id: ids.recipe, bins_count: 4,
@@ -179,6 +209,11 @@ describe('baking batch', () => {
     expect(res.status).toBe(200);
     expect(res.body.id).toBe(ids.batch);
     expect(await remaining(ids.flourLot1)).toBe(30);
+    expect(await remaining(ids.flourLot2)).toBe(10);
+    expect(await remaining(ids.oatsLot)).toBe(80);
+
+    const removed = await api().delete(`/api/batches/${sharedNumber.body.id}`).set(auth(operator));
+    expect(removed.status).toBe(200);
     expect(await remaining(ids.flourLot2)).toBe(30);
     expect(await remaining(ids.oatsLot)).toBe(90);
   });

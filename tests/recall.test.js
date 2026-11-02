@@ -69,10 +69,29 @@ describe('recall', () => {
   test('by batch: lots upstream, customers downstream, stock still on hand', async () => {
     const res = await api().get('/api/recall/batch/B-1').set(auth(qa));
     expect(res.body.batch.recipe_name).toBe('Honey Almond');
+    expect(res.body.batches).toHaveLength(1);
     expect(res.body.upstream_lots).toEqual([expect.objectContaining({ lot_number: 'FL-42', supplier_name: 'Approved Miller', stage: 'baking' })]);
     expect(res.body.shipments).toEqual([expect.objectContaining({ customer_name: 'Whole Foods', invoice_number: 'INV-77', boxes: 1 })]);
     expect(res.body.summary.customers).toEqual(['Whole Foods']);
     expect(res.body.on_hand).toEqual([]);
+  });
+
+  test('a shared batch number recalls every formulation record', async () => {
+    const otherRecipe = await one(
+      "INSERT INTO recipes (name, total_baking_grams) VALUES ('Cocoa Almond', 6900) RETURNING id"
+    );
+    const created = await one(
+      `INSERT INTO production_batches (batch_number, recipe_id, production_date, bins_count, status)
+       VALUES ('B-1', $1, CURRENT_DATE, 2, 'In Production') RETURNING id`,
+      [otherRecipe.id]
+    );
+
+    const res = await api().get('/api/recall/batch/B-1').set(auth(qa));
+    expect(res.status).toBe(200);
+    expect(res.body.batches.map(b => b.recipe_name).sort()).toEqual(['Cocoa Almond', 'Honey Almond']);
+    expect(res.body.upstream_lots).toHaveLength(1);
+    expect(res.body.shipments).toHaveLength(1);
+    await pool.query('DELETE FROM production_batches WHERE id = $1', [created.id]);
   });
 
   test('by lot: every batch that used it, with the customers and unshipped stock', async () => {
