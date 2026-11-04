@@ -218,6 +218,59 @@ describe('baking batch', () => {
     expect(await remaining(ids.oatsLot)).toBe(90);
   });
 
+  test('group save creates and packages multiple formulations atomically with employee details', async () => {
+    const secondRecipe = (await pool.query(
+      "INSERT INTO recipes (name, total_baking_grams) VALUES ('Cocoa Group Test', 15000) RETURNING id"
+    )).rows[0].id;
+    await pool.query(
+      `INSERT INTO recipe_items (recipe_id, item_id, grams_per_batch)
+       SELECT $1, item_id, grams_per_batch FROM recipe_items WHERE recipe_id = $2`,
+      [secondRecipe, ids.recipe]
+    );
+    await pool.query(
+      `INSERT INTO recipe_packaging_bom (recipe_id, packaging_id, amount, measure, assignment)
+       SELECT $1, packaging_id, amount, measure, assignment
+         FROM recipe_packaging_bom WHERE recipe_id = $2`,
+      [secondRecipe, ids.recipe]
+    );
+
+    const saved = await api().post('/api/batches/baking/group').set(auth(operator)).send({
+      batch_number: 'B-GROUP', production_date: '2026-10-25', baking_employees: ['Alex', 'Sam'],
+      runs: [ids.recipe, secondRecipe].map(recipe_id => ({
+        recipe_id, bins_large: 1, bins_small: 1, scale_basis: 'batch',
+        splits: [
+          { item_id: ids.flour, lot_id: ids.flourLot2, quantity: 10 },
+          { item_id: ids.oats, lot_id: ids.oatsLot, quantity: 5 }
+        ]
+      }))
+    });
+    expect(saved.status).toBe(200);
+    expect(saved.body.runs).toHaveLength(2);
+    expect(saved.body.runs.map(run => run.baking_employees)).toEqual([['Alex', 'Sam'], ['Alex', 'Sam']]);
+    expect(saved.body.runs.map(run => [Number(run.bins_large_count), Number(run.bins_small_count)]))
+      .toEqual([[1, 1], [1, 1]]);
+
+    const packaged = await api().post('/api/batches/packaging/group').set(auth(operator)).send({
+      batch_number: 'B-GROUP', packaging_date: '2026-10-26', packaging_employees: ['Taylor'],
+      runs: saved.body.runs.map(run => ({
+        batch_id: run.id, bags_575g: 1, boxes_575g: 0, bags_312g: 0, boxes_312g: 0,
+        splits: [{ item_id: ids.bag, lot_id: ids.bagLot, quantity: 1 }]
+      }))
+    });
+    expect(packaged.status).toBe(200);
+    expect(packaged.body.runs).toHaveLength(2);
+    expect(packaged.body.runs.map(run => run.packaging_employees)).toEqual([['Taylor'], ['Taylor']]);
+    expect(packaged.body.runs.map(run => String(run.packaging_date))).toEqual(['2026-10-26', '2026-10-26']);
+
+    for (const run of packaged.body.runs) {
+      const removed = await api().delete(`/api/batches/${run.id}`).set(auth(operator));
+      expect(removed.status).toBe(200);
+    }
+    expect(await remaining(ids.flourLot2)).toBe(30);
+    expect(await remaining(ids.oatsLot)).toBe(90);
+    expect(await remaining(ids.bagLot)).toBe(1000);
+  });
+
   test('splits that do not add up to the requirement are rejected', async () => {
     const res = await api().post('/api/batches/baking').set(auth(operator)).send({
       batch_number: 'B-101', recipe_id: ids.recipe, bins_count: 4,
