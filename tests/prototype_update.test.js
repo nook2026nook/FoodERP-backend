@@ -63,6 +63,21 @@ describe('received lots', () => {
     expect(lot).toMatchObject({ spec_doc_name: 'flour-coa.pdf', spec_doc_size: '123.4 KB', item_code: item.body.item_code });
   });
 
+  test('a lot number already received for the item can be received again as a new lot', async () => {
+    const item = await newItem(operator, 'Repeat Cinnamon', 'Baking', 'kg');
+    const other = await newItem(operator, 'Repeat Dates', 'Baking', 'kg');
+    const receive = (items) => api().post('/api/lots/receive').set(auth(operator)).send({ supplier_id: supplierId, items });
+    expect((await receive([{ item_id: item.body.id, lot_number: '62781', packs_received: 1 }])).status).toBe(201);
+    const again = await receive([
+      { item_id: item.body.id, lot_number: '62781', packs_received: 2 },
+      { item_id: other.body.id, lot_number: '62781', packs_received: 1 }
+    ]);
+    expect(again.status).toBe(201);
+    expect(again.body.lots).toHaveLength(2);
+    const list = await api().get('/api/lots').set(auth(operator));
+    expect(list.body.filter(l => l.lot_number === '62781')).toHaveLength(3);
+  });
+
   test('only an administrator can delete a lot', async () => {
     const denied = await api().delete(`/api/lots/${lotId}`).set(auth(operator));
     expect(denied.status).toBe(403);

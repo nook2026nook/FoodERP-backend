@@ -124,3 +124,63 @@ test('a batch with shipments cannot be deleted', async () => {
   const res = await api().delete(`/api/batches/${ids.new}`).set(auth(admin));
   expect(res.status).toBe(409);
 });
+
+describe('mapping an invoice line to a batch', () => {
+  async function qboLine(invoice, qboItemId, quantity) {
+    const s = await pool.query(
+      `INSERT INTO shipments (invoice_number, customer_name, shipped_at, source, qbo_invoice_id)
+       VALUES ($1,'Newport Gourmet','2026-11-04','QuickBooks API',$2) RETURNING id`, [invoice, `qbo-${invoice}`]
+    );
+    const l = await pool.query(
+      `INSERT INTO shipment_lines (shipment_id, quantity, qbo_line_id, qbo_item_id, product_description)
+       VALUES ($1,$2,'1',$3,'575 Case:Honey Almond 575 Grams') RETURNING id`, [s.rows[0].id, quantity, qboItemId]
+    );
+    return l.rows[0].id;
+  }
+
+  test('an unmapped QuickBooks line maps to the chosen batch and the item is remembered', async () => {
+    const batch = await packedBatch('B-MAP', '2026-10-20', 'Released', 6, 0);
+    const first = await qboLine('298484', 'ITEM-77', 4);
+    const second = await qboLine('298485', 'ITEM-77', 1);
+
+    const res = await api().put(`/api/shipments/lines/${first}/batch`).set(auth(admin))
+      .send({ batch_id: batch, format: '575g' });
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({ status: 'allocated', batch_number: 'B-MAP', remembered: true });
+
+    const allocs = await pool.query('SELECT batch_id, boxes FROM shipment_allocations WHERE line_id = $1', [first]);
+    expect(allocs.rows).toEqual([{ batch_id: batch, boxes: 4 }]);
+    const map = await pool.query("SELECT recipe_id, format, unit_type FROM qbo_item_map WHERE qbo_item_id = 'ITEM-77'");
+    expect(map.rows[0]).toEqual({ recipe_id: ids.recipe, format: '575g', unit_type: 'box' });
+    const other = await pool.query('SELECT recipe_id, allocation_status FROM shipment_lines WHERE id = $1', [second]);
+    expect(other.rows[0]).toEqual({ recipe_id: ids.recipe, allocation_status: 'allocated' });
+  });
+
+  test('re-mapping moves the line to another batch and returns the stock', async () => {
+    const a = await packedBatch('B-REMAP-A', '2026-10-21', 'Released', 3, 0);
+    const b = await packedBatch('B-REMAP-B', '2026-10-22', 'Released', 3, 0);
+    const line = await qboLine('298486', 'ITEM-78', 2);
+    expect((await api().put(`/api/shipments/lines/${line}/batch`).set(auth(clerk)).send({ batch_id: a, format: '575g' })).status).toBe(200);
+    expect(await batchStock(a)).toEqual({ boxes: 1, bags: 0 });
+    const res = await api().put(`/api/shipments/lines/${line}/batch`).set(auth(clerk)).send({ batch_id: b, format: '575g' });
+    expect(res.status).toBe(200);
+    expect(res.body.remembered).toBe(false); // only an Administrator saves item mappings
+    expect(await batchStock(a)).toEqual({ boxes: 3, bags: 0 });
+    expect(await batchStock(b)).toEqual({ boxes: 1, bags: 0 });
+  });
+
+  test('a batch without released stock is refused and nothing changes', async () => {
+    const held = await packedBatch('B-MAP-HOLD', '2026-10-23', 'Quality Hold', 5, 0);
+    const line = await qboLine('298487', 'ITEM-79', 1);
+    const res = await api().put(`/api/shipments/lines/${line}/batch`).set(auth(admin)).send({ batch_id: held, format: '575g' });
+    expect(res.status).toBe(409);
+    const l = await pool.query('SELECT recipe_id, allocation_status FROM shipment_lines WHERE id = $1', [line]);
+    expect(l.rows[0]).toEqual({ recipe_id: null, allocation_status: 'unallocated' });
+  });
+
+  test('a guest cannot map batches', async () => {
+    const line = await qboLine('298488', 'ITEM-80', 1);
+    const res = await api().put(`/api/shipments/lines/${line}/batch`).set(auth(guest)).send({ batch_id: ids.new, format: '575g' });
+    expect(res.status).toBe(403);
+  });
+});

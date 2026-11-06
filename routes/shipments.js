@@ -8,6 +8,7 @@ const {
 } = require('../utils/finishedStock');
 const { requireAdmin } = require('../middleware/auth');
 const { httpError } = require('../utils/stock');
+const { applyMappings } = require('../utils/qboSync');
 
 const router = express.Router();
 router.use(authenticate, requireMenuAccess('shipping', 'reports', 'recall'));
@@ -130,6 +131,61 @@ router.post('/lines/:id/allocate', requireAdmin, async (req, res, next) => {
       return r;
     });
     res.json(result);
+  } catch (e) { handleError(e, res, next); }
+});
+
+// PUT /api/shipments/lines/:id/batch { batch_id, format, unit_type? } — map one invoice line
+// (QuickBooks or manual) to a production batch: its previous allocations are released and the
+// line is allocated from that batch. A line with no product yet takes the batch's formulation.
+// For an Administrator, a QuickBooks item with no item mapping is remembered so later
+// invoices of that item map automatically (open lines of it are mapped now, oldest batch first).
+router.put('/lines/:id/batch', requireEdit('shipping'), async (req, res, next) => {
+  try {
+    const d = z.object({
+      batch_id: z.string().uuid(),
+      format: z.enum(['575g', '312g']),
+      unit_type: z.enum(['box', 'bag']).optional()
+    }).parse(req.body || {});
+
+    const result = await withTransaction(async (client) => {
+      const { rows: [line] } = await client.query(
+        'SELECT * FROM shipment_lines WHERE id = $1 FOR UPDATE', [req.params.id]
+      );
+      if (!line) throw httpError(404, 'Shipment line not found');
+      const { rows: [batch] } = await client.query(
+        `SELECT b.id, b.batch_number, b.recipe_id, r.name AS recipe_name
+           FROM production_batches b JOIN recipes r ON r.id = b.recipe_id WHERE b.id = $1`, [d.batch_id]
+      );
+      if (!batch) throw httpError(404, 'Batch not found');
+
+      await releaseLine(client, line.id);
+      const unitType = line.unit_type || d.unit_type || 'box';
+      await client.query(
+        'UPDATE shipment_lines SET recipe_id = $1, format = $2, unit_type = $3 WHERE id = $4',
+        [batch.recipe_id, d.format, unitType, line.id]
+      );
+      const r = await allocateLine(client, line.id, { batchId: batch.id, userId: req.user.id, method: 'manual' });
+
+      let remembered = false;
+      if (line.qbo_item_id && req.user.role === 'Administrator') {
+        const ins = await client.query(
+          `INSERT INTO qbo_item_map (qbo_item_id, qbo_item_name, recipe_id, format, unit_type)
+           VALUES ($1,$2,$3,$4,$5) ON CONFLICT (qbo_item_id) DO NOTHING RETURNING *`,
+          [line.qbo_item_id, (line.product_description || batch.recipe_name).slice(0, 255), batch.recipe_id, d.format, unitType]
+        );
+        if (ins.rows.length) {
+          remembered = true;
+          await logAudit(client, req.user.id, 'UPSERT', 'qbo_item_map', ins.rows[0].id, null, ins.rows[0], req.ip);
+        }
+      }
+      await logAudit(client, req.user.id, 'MAP_BATCH', 'shipment_line', line.id,
+        { recipe_id: line.recipe_id, format: line.format, unit_type: line.unit_type, allocation_status: line.allocation_status },
+        { batch_id: batch.id, batch_number: batch.batch_number, recipe_id: batch.recipe_id, format: d.format, unit_type: unitType, ...r }, req.ip);
+      return { ...r, batch_number: batch.batch_number, recipe_name: batch.recipe_name, remembered };
+    });
+
+    const applied = result.remembered ? await applyMappings(req.db, req.user.id) : null;
+    res.json({ ...result, applied });
   } catch (e) { handleError(e, res, next); }
 });
 

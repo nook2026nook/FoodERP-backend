@@ -92,15 +92,9 @@ router.post('/receive', requireEdit('receiving'), async (req, res, next) => {
 
     const result = await withTransaction(async (client) => {
       const created = [];
-      const seen = new Set();
 
+      // Lot numbers may repeat (across deliveries or items); each line becomes its own lot record.
       for (const line of data.items) {
-        if (seen.has(line.lot_number)) {
-          const err = new Error(`Duplicate lot number in this receipt: ${line.lot_number}`);
-          err.status = 400; throw err;
-        }
-        seen.add(line.lot_number);
-
         const item = await client.query(
           'SELECT id, name, unit_type, unit_pack_size FROM master_items WHERE id = $1', [line.item_id]
         );
