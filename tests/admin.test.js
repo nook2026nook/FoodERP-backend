@@ -145,6 +145,29 @@ describe('export', () => {
     expect(text).not.toMatch(/password_hash/);
     expect(text).not.toMatch(/secret-hash/);
   });
+
+  test('carries the browser app keys so its Restore button can load the file', async () => {
+    const res = await api().get('/api/admin/export').set(auth(admin));
+    const b = res.body;
+    expect(b.bakingIngredients).toEqual([expect.objectContaining({ name: 'Rolled Oats', unitPackKg: 25, category: 'Baking' })]);
+    expect(b.packagingMaterials).toHaveLength(1);
+    expect(b.suppliers).toEqual(expect.arrayContaining(['Approved Commercial Miller']));
+    const oats = b.lots.find(l => l.lotNumber === 'OAT-01');
+    expect(oats).toMatchObject({ ingredientId: b.bakingIngredients[0].id, ingredientName: 'Rolled Oats' });
+    expect(b.recipes[0].items[0]).toMatchObject({ ingredientId: oats.ingredientId, gramsPerUnit: 5750 });
+    const batch = b.batches[0];
+    expect(batch).toMatchObject({ batchNumber: 'BATCH-260101-111', recipeId: b.recipes[0].id, status: 'Fully Packaged & Dispatched' });
+    expect(batch.bakingDeductions).toEqual({ 'OAT-01': 11.5 });
+    expect(batch.packagingBreakdown.pack575.bagsCount).toBe(20);
+    expect(Array.isArray(b.shippings)).toBe(true);
+    // Server users have no PIN; restoring them would lock the browser app.
+    expect(b.usersDatabase).toBeUndefined();
+
+    // The same file still imports into the server (existing records skipped).
+    const back = await api().post('/api/admin/import').set(auth(admin)).send(b);
+    expect(back.status).toBe(200);
+    expect(back.body.created.lots || 0).toBe(0);
+  });
 });
 
 describe('forced password change', () => {

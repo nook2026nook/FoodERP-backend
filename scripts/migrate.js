@@ -3,11 +3,19 @@ const path = require('path');
 const { Pool } = require('pg');
 require('dotenv').config();
 
-async function runMigrations() {
-  const pool = new Pool({ connectionString: process.env.DATABASE_URL });
+/**
+ * Apply every pending SQL migration in filename order. Throws on failure.
+ * Used by `npm run migrate` and by server.js on every boot, so a deploy can
+ * never run new code against an old schema.
+ */
+async function runMigrations({ log = console.log } = {}) {
+  const pool = new Pool({
+    connectionString: process.env.DATABASE_URL,
+    ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : undefined
+  });
 
   try {
-    console.log('🔄 Running database migrations...\n');
+    log('🔄 Running database migrations...\n');
 
     const migrationCandidates = [
       path.join(__dirname, '../db/migrations'),
@@ -40,11 +48,8 @@ async function runMigrations() {
     const applied = new Set(rows.map(r => r.filename));
 
     for (const file of sqlFiles) {
-      if (applied.has(file)) {
-        console.log(`   - ${file} already applied`);
-        continue;
-      }
-      console.log(`   Executing: ${file}`);
+      if (applied.has(file)) continue;
+      log(`   Executing: ${file}`);
       const sql = await fs.readFile(path.join(migrationsDir, file), 'utf8');
       const client = await pool.connect();
       try {
@@ -58,20 +63,20 @@ async function runMigrations() {
       } finally {
         client.release();
       }
-      console.log(`   ✓ ${file} completed`);
+      log(`   ✓ ${file} completed`);
     }
 
     console.log('\n✅ All migrations completed successfully\n');
-  } catch (error) {
-    console.error('❌ Migration failed:', error.message);
-    process.exit(1);
   } finally {
     await pool.end();
   }
 }
 
 if (require.main === module) {
-  runMigrations();
+  runMigrations().catch((error) => {
+    console.error('❌ Migration failed:', error.message);
+    process.exit(1);
+  });
 }
 
 module.exports = runMigrations;

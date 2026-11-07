@@ -6,6 +6,7 @@ const { logAudit } = require('../utils/audit');
 const { withTransaction } = require('../db');
 const { hashPassword } = require('../utils/password');
 const { importPrototypeBackup } = require('../utils/prototypeImport');
+const { toPrototypeBackup } = require('../utils/prototypeExport');
 const { httpError } = require('../utils/stock');
 
 const router = express.Router();
@@ -152,7 +153,10 @@ router.get('/export', async (req, res, next) => {
       exported_at: new Date().toISOString(),
       schema_migrations: migrations.rows.map(r => r.filename),
       counts: Object.fromEntries(Object.entries(data).map(([k, v]) => [k, v.length])),
-      data
+      data,
+      // The same records under the browser app's own keys: its Restore button
+      // reads only these top-level keys.
+      ...toPrototypeBackup(data)
     });
   } catch (e) { next(e); }
 });

@@ -125,8 +125,13 @@ process.on('SIGTERM', async () => {
 });
 
 // Tests import the app without opening a port.
-if (require.main === module) app.listen(PORT, () => {
-  console.log(`
+// Pending migrations are applied before listening; if one fails the process
+// exits so the host keeps the previous healthy deploy instead of serving
+// new code on an old schema.
+if (require.main === module) {
+  require('./scripts/migrate')()
+    .then(() => app.listen(PORT, () => {
+      console.log(`
 ╔═══════════════════════════════════════════╗
 ║   FoodTrace ERP Backend Server Running    ║
 ╠═══════════════════════════════════════════╣
@@ -135,6 +140,11 @@ if (require.main === module) app.listen(PORT, () => {
 ║  Database:    ${pool.options.database?.padEnd(28) || 'Connected'.padEnd(28)}║
 ╚═══════════════════════════════════════════╝
   `);
-});
+    }))
+    .catch((err) => {
+      console.error('❌ Startup migration failed:', err.message);
+      process.exit(1);
+    });
+}
 
 module.exports = app;
