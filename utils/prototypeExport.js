@@ -156,6 +156,9 @@ function toPrototypeBackup(data) {
 
   // One browser-app shipping row per batch a line was shipped from.
   // The browser app counts quantity in bags (12 bags per box).
+  // Only quantities allocated to a batch are exported: unallocated invoice
+  // lines do not reduce stock on the server, but the browser app subtracts
+  // every shipping row from its flavor, which zeroed new batches' boxes.
   const lineAllocations = groupBy(data.shipment_allocations, 'line_id');
   const shipmentLines = groupBy(data.shipment_lines, 'shipment_id');
   const shippings = [];
@@ -164,9 +167,6 @@ function toPrototypeBackup(data) {
       const parts = (lineAllocations.get(line.id) || []).map(a => ({
         batchId: a.batch_id, bags: n(a.boxes) * 12 + n(a.bags)
       }));
-      if (!parts.length) {
-        parts.push({ batchId: line.batch_id || null, bags: line.unit_type === 'box' ? n(line.quantity) * 12 : n(line.quantity) });
-      }
       parts.forEach((p, idx) => {
         const batch = batches.get(p.batchId);
         shippings.push({
