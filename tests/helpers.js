@@ -10,7 +10,7 @@ const TABLES = [
   'shipment_allocations', 'shipment_lines', 'shipments', 'inventory_adjustments',
   'batch_lot_allocations', 'batch_packaging', 'production_batches',
   'recipe_packaging_bom', 'recipe_items', 'qbo_item_map', 'recipes',
-  'warehouse_lots', 'master_items', 'suppliers', 'audit_log', 'app_settings', 'users'
+  'production_plans', 'warehouse_lots', 'master_items', 'suppliers', 'audit_log', 'app_settings', 'users'
 ];
 
 async function resetDb() {
