@@ -137,6 +137,7 @@ const EXPORT_TABLES = [
   ['shipment_lines', 'SELECT * FROM shipment_lines'],
   ['shipment_allocations', 'SELECT * FROM shipment_allocations'],
   ['qbo_item_map', 'SELECT * FROM qbo_item_map'],
+  ['production_plans', 'SELECT * FROM production_plans ORDER BY created_at'],
   ['app_settings', "SELECT key, value, updated_at FROM app_settings WHERE key <> 'vault_passcode_hash'"]
 ];
 

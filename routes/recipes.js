@@ -134,8 +134,8 @@ async function writeFormula(client, recipeId, d) {
   }
 }
 
-// GET /api/recipes/options — names only, for Production; no vault, no costs or grams.
-router.get('/options', requireMenuAccess('production', 'recipes'), async (req, res, next) => {
+// GET /api/recipes/options — names only, for Production and Planning; no vault, no costs or grams.
+router.get('/options', requireMenuAccess('production', 'production_planning', 'recipes'), async (req, res, next) => {
   try {
     const { rows } = await req.db.query('SELECT id, name, scale_basis FROM recipes ORDER BY name');
     res.json(rows);

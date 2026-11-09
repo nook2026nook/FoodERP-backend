@@ -3,7 +3,7 @@ const config = require('../config');
 
 const ROLE_DEFAULT_MENUS = {
   Administrator: config.menus,
-  'Production Operator': ['dashboard', 'ingredients_hub', 'receiving', 'recipes', 'production', 'ready_to_ship', 'reports', 'wastage', 'help'],
+  'Production Operator': ['dashboard', 'ingredients_hub', 'receiving', 'recipes', 'production_planning', 'production', 'ready_to_ship', 'reports', 'wastage', 'help'],
   'Quality Assurance (QA)': ['dashboard', 'ingredients_hub', 'recipes', 'production', 'ready_to_ship', 'reports', 'wastage', 'recall', 'help'],
   'Shipping Clerk': ['dashboard', 'ready_to_ship', 'shipping', 'reports', 'recall', 'help'],
   'View-Only Guest': ['dashboard', 'ingredients_hub', 'ready_to_ship', 'reports', 'help'],
@@ -17,6 +17,8 @@ const ROLE_CAN_EDIT = {
   receiving_delete: ['Administrator'],
   recipes: ['Administrator', 'Production Operator'],
   production: ['Administrator', 'Production Operator'],
+  // Saving / finalizing production plans (v60 Production Planning)
+  production_planning: ['Administrator', 'Production Operator'],
   // QA hold / release of batches (DECISIONS.md #23)
   quality: ['Administrator', 'Quality Assurance (QA)'],
   shipping: ['Administrator', 'Shipping Clerk'],
@@ -26,8 +28,15 @@ const ROLE_CAN_EDIT = {
 
 function resolveUserAllowedMenus(user) {
   if (user.role === 'Administrator') return config.menus;
-  if (Array.isArray(user.allowed_menus) && user.allowed_menus.length > 0) return user.allowed_menus;
-  return ROLE_DEFAULT_MENUS[user.role] || ['dashboard'];
+  const menus = Array.isArray(user.allowed_menus) && user.allowed_menus.length > 0
+    ? [...user.allowed_menus]
+    : [...(ROLE_DEFAULT_MENUS[user.role] || ['dashboard'])];
+  // Production Planning (v60) came after custom menu lists were saved: anyone who
+  // can open Production also gets Planning, placed just before it.
+  if (menus.includes('production') && !menus.includes('production_planning')) {
+    menus.splice(menus.indexOf('production'), 0, 'production_planning');
+  }
+  return menus;
 }
 
 function authenticate(req, res, next) {

@@ -31,7 +31,7 @@ module.exports = {
   },
   backupRetentionDays: parseInt(process.env.BACKUP_RETENTION_DAYS || '14', 10),
   menus: [
-    'dashboard', 'ingredients_hub', 'receiving', 'recipes', 'production',
+    'dashboard', 'ingredients_hub', 'receiving', 'recipes', 'production_planning', 'production',
     'ready_to_ship', 'shipping', 'reports', 'wastage', 'recall', 'help'
   ]
 };

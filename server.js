@@ -58,6 +58,7 @@ app.use('/api/items', require('./routes/items'));
 app.use('/api/lots', require('./routes/lots'));
 app.use('/api/recipes', require('./routes/recipes'));
 app.use('/api/batches', require('./routes/batches'));
+app.use('/api/planning', require('./routes/planning'));
 app.use('/api/shipments', require('./routes/shipments'));
 app.use('/api/inventory', require('./routes/inventory'));
 app.use('/api/recall', require('./routes/recall'));
