@@ -178,6 +178,46 @@ describe('mapping an invoice line to a batch', () => {
     expect(l.rows[0]).toEqual({ recipe_id: null, allocation_status: 'unallocated' });
   });
 
+  test('a line with a known flavor cannot be mapped to another flavor or size (invoice 10587)', async () => {
+    const other = (await pool.query("INSERT INTO recipes (name, total_baking_grams) VALUES ('Simply Almond', 15000) RETURNING id")).rows[0].id;
+    const otherBatch = (await pool.query(
+      `INSERT INTO production_batches (batch_number, recipe_id, bins_count, status, packaged_at) VALUES ('B-SA',$1,2,'Released',NOW()) RETURNING id`, [other]
+    )).rows[0].id;
+    await pool.query('INSERT INTO batch_packaging (batch_id, boxes_575g) VALUES ($1,10)', [otherBatch]);
+    const own = await packedBatch('B-OWN', '2026-10-24', 'Released', 5, 0);
+    const line = await qboLine('298490', 'ITEM-81', 2);
+    await pool.query("UPDATE shipment_lines SET recipe_id = $1, format = '575g', unit_type = 'box' WHERE id = $2", [ids.recipe, line]);
+
+    const wrongFlavor = await api().put(`/api/shipments/lines/${line}/batch`).set(auth(admin)).send({ batch_id: otherBatch, format: '575g' });
+    expect(wrongFlavor.status).toBe(409);
+    expect(wrongFlavor.body.error).toMatch(/Honey Almond/);
+    const wrongSize = await api().put(`/api/shipments/lines/${line}/batch`).set(auth(admin)).send({ batch_id: own, format: '312g' });
+    expect(wrongSize.status).toBe(409);
+
+    const l = await pool.query('SELECT recipe_id, format, allocation_status FROM shipment_lines WHERE id = $1', [line]);
+    expect(l.rows[0]).toEqual({ recipe_id: ids.recipe, format: '575g', allocation_status: 'unallocated' });
+    expect(await pool.query('SELECT 1 FROM shipment_allocations WHERE batch_id = $1', [otherBatch])).toMatchObject({ rowCount: 0 });
+
+    const right = await api().put(`/api/shipments/lines/${line}/batch`).set(auth(admin)).send({ batch_id: own, format: '575g' });
+    expect(right.status).toBe(200);
+  });
+
+  test('invoice lines are listed in QuickBooks line order', async () => {
+    const s = await pool.query(
+      `INSERT INTO shipments (invoice_number, customer_name, shipped_at, source, qbo_invoice_id)
+       VALUES ('298491','Newport Gourmet','2026-11-05','QuickBooks API','qbo-298491') RETURNING id`
+    );
+    for (const n of ['10', '2', '9', '1']) {
+      await pool.query(
+        `INSERT INTO shipment_lines (shipment_id, quantity, qbo_line_id, product_description) VALUES ($1,1,$2,$3)`,
+        [s.rows[0].id, n, `Line ${n}`]
+      );
+    }
+    const res = await api().get('/api/shipments').set(auth(admin));
+    const inv = res.body.find((x) => x.invoice_number === '298491');
+    expect(inv.lines.map((l) => l.qbo_line_id)).toEqual(['1', '2', '9', '10']);
+  });
+
   test('a guest cannot map batches', async () => {
     const line = await qboLine('298488', 'ITEM-80', 1);
     const res = await api().put(`/api/shipments/lines/${line}/batch`).set(auth(guest)).send({ batch_id: ids.new, format: '575g' });

@@ -48,7 +48,8 @@ async function listShipments(db, { id = null, from = null, to = null } = {}) {
     `SELECT l.*, r.name AS recipe_name
        FROM shipment_lines l LEFT JOIN recipes r ON r.id = l.recipe_id
       WHERE l.shipment_id = ANY($1::uuid[])
-      ORDER BY l.created_at`, [ids]
+      -- Invoice order: QuickBooks line number, then manual lines in entry order.
+      ORDER BY NULLIF(regexp_replace(COALESCE(l.qbo_line_id, ''), '[^0-9]', '', 'g'), '')::bigint NULLS LAST, l.created_at`, [ids]
   );
   const { rows: allocs } = await db.query(
     `SELECT a.line_id, a.batch_id, b.batch_number, a.boxes, a.bags, a.method
@@ -157,6 +158,17 @@ router.put('/lines/:id/batch', requireEdit('shipping'), async (req, res, next) =
            FROM production_batches b JOIN recipes r ON r.id = b.recipe_id WHERE b.id = $1`, [d.batch_id]
       );
       if (!batch) throw httpError(404, 'Batch not found');
+
+      // A line whose product is known (from the QuickBooks item map or a manual entry) keeps
+      // its flavor and size: mapping it to another flavor's batch would rename the invoice line
+      // and take stock from the wrong product.
+      if (line.recipe_id && line.recipe_id !== batch.recipe_id) {
+        const { rows: [own] } = await client.query('SELECT name FROM recipes WHERE id = $1', [line.recipe_id]);
+        throw httpError(409, `This invoice line is ${own?.name || 'another flavor'}; choose a ${own?.name || 'matching'} batch, not ${batch.recipe_name}`);
+      }
+      if (line.format && line.format !== d.format) {
+        throw httpError(409, `This invoice line is ${line.format}; choose ${line.format} stock of the batch`);
+      }
 
       await releaseLine(client, line.id);
       const unitType = line.unit_type || d.unit_type || 'box';
