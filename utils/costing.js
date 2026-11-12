@@ -85,6 +85,15 @@ function calculateRecipeCost(p) {
   const ret575 = markup(dist575, ret);
   const ret312 = markup(dist312, ret);
 
+  // 180g (client, 2026-11-13): display only, from total formula weight (baking + gram-measured
+  // packaging such as inclusions), 2 decimals. 575g/312g above stay on baking grams, whole bags.
+  const totalFormulaGrams = totalBakingGrams + totalPackagingGrams;
+  const units180 = Math.round((totalFormulaGrams / 180) * 100) / 100;
+  const costPer180g = units180 > 0 ? baseBatchCost / units180 : 0;
+  const mfg180 = markup(costPer180g, mfg);
+  const dist180 = markup(mfg180, dist);
+  const ret180 = markup(dist180, ret);
+
   return {
     doughCost: ROUND(doughCost),
     bagMaterialCost: ROUND(bag575Cost + bag312Cost),
@@ -109,7 +118,13 @@ function calculateRecipeCost(p) {
     distPrice575g: ROUND(dist575),
     distPrice312g: ROUND(dist312),
     retailPrice575g: ROUND(ret575),
-    retailPrice312g: ROUND(ret312)
+    retailPrice312g: ROUND(ret312),
+    totalFormulaGrams: ROUND(totalFormulaGrams),
+    units180,
+    costPer180g: ROUND(costPer180g),
+    mfgPrice180g: ROUND(mfg180),
+    distPrice180g: ROUND(dist180),
+    retailPrice180g: ROUND(ret180)
   };
 }
 

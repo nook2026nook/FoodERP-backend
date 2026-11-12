@@ -1,6 +1,6 @@
 /**
  * Production Planning (client prototype v60): customer box orders -> net boxes
- * to bake (after released stock), gross dough with wastage, whole batches,
+ * to bake (after released stock), gross dough with wastage, batches in half-batch (1 bin) steps,
  * bins, and a material pull list checked against live lot stock.
  *
  * Batch and packaging quantities reuse the Production screen's own math
@@ -74,10 +74,11 @@ async function calculatePlan(db, { lines, deduct_inventory: deduct }) {
     const grossKg = netKg > 0 ? netKg / (1 - wastage / 100) : 0;
     const batchSizeKg = num(recipe.total_baking_grams) / 1000;
     const exact = grossKg / batchSizeKg;
-    // Round tiny float noise (e.g. 3.0000000001) before taking whole batches.
-    const batches = grossKg > 0 ? Math.ceil(ROUND(exact)) : 0;
+    // Whole bins: a batch is 2 bins, so batch-basis recipes can schedule half batches (1.4 -> 1.5).
+    // ROUND first drops float noise (e.g. 3.0000000001) before rounding up.
     const basis = recipe.scale_basis === 'bin' ? 'bin' : 'batch';
-    const bins = basis === 'bin' ? batches : batches * 2;
+    const bins = grossKg > 0 ? Math.ceil(ROUND(basis === 'bin' ? exact : exact * 2)) : 0;
+    const batches = basis === 'bin' ? bins : bins / 2;
     const totalNet = net575 + net312;
     const binsLarge = totalNet > 0 ? Math.round((net575 / totalNet) * bins) : bins;
 

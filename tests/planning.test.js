@@ -97,6 +97,14 @@ describe('calculate', () => {
     expect(off.body.totals.net_boxes).toBe(55);
   });
 
+  test('small orders schedule a half batch (one bin), not a whole batch', async () => {
+    const res = await api().post('/api/planning/calculate').set(auth(operator)).send({
+      lines: [{ recipe_id: ids.recipe, pack_size: '575', boxes_ordered: 11 }] // 10 in stock -> 1 net box
+    });
+    expect(res.body.flavors[0]).toMatchObject({ exact_batches: 0.3538, scheduled_batches: 0.5, scheduled_bins: 1 });
+    expect(res.body.flavors[0].ingredients.find(i => i.item_id === ids.flour).required).toBe(7.5);
+  });
+
   test('orders covered by stock schedule nothing', async () => {
     const res = await api().post('/api/planning/calculate').set(auth(operator)).send({
       lines: [{ recipe_id: ids.recipe, pack_size: '575', boxes_ordered: 8 }]
