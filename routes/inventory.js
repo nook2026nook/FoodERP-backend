@@ -1,11 +1,11 @@
 const express = require('express');
 const { z } = require('zod');
-const { authenticate, requireMenuAccess, ROLE_CAN_EDIT } = require('../middleware/auth');
+const { authenticate, requireMenuAccess, requireAdmin, ROLE_CAN_EDIT } = require('../middleware/auth');
 const { logAudit } = require('../utils/audit');
 const { withTransaction } = require('../db');
 const { valueReadyToShip, packagingRowCost, ROUND } = require('../utils/costing');
 const { costPerUnit } = require('../utils/recipeData');
-const { lockBatches, recordBoxOpening, SHIPPABLE } = require('../utils/finishedStock');
+const { lockBatches, recordBoxOpening, refreshShipStatus, SHIPPABLE } = require('../utils/finishedStock');
 const { httpError } = require('../utils/stock');
 
 const router = express.Router();
@@ -121,6 +121,43 @@ router.post('/open-box', async (req, res, next) => {
         'SELECT * FROM batch_finished_stock WHERE batch_id = $1 AND format = $2', [d.batch_id, d.format]
       );
       return after.rows[0];
+    });
+    res.json(result);
+  } catch (e) { handleError(e, res, next); }
+});
+
+// POST /api/inventory/set-stock — Administrator enters the counted boxes and loose bags on hand
+// for one batch and format; the difference is recorded as a 'manual_count' adjustment.
+router.post('/set-stock', requireAdmin, async (req, res, next) => {
+  try {
+    const d = z.object({
+      batch_id: z.string().uuid(),
+      format: z.enum(['575g', '312g']),
+      boxes: z.number().int().min(0).max(100000),
+      bags: z.number().int().min(0).max(100000)
+    }).parse(req.body);
+
+    const result = await withTransaction(async (client) => {
+      await lockBatches(client, [d.batch_id]);
+      const stockOf = async () => (await client.query(
+        'SELECT * FROM batch_finished_stock WHERE batch_id = $1 AND format = $2', [d.batch_id, d.format]
+      )).rows[0];
+      const before = await stockOf();
+      if (!before) throw httpError(404, 'No packed stock for that batch and format');
+      const boxDelta = d.boxes - Number(before.boxes_on_hand);
+      const bagDelta = d.bags - Number(before.bags_on_hand);
+      if (!boxDelta && !bagDelta) return before;
+      await client.query(
+        `INSERT INTO inventory_adjustments (recipe_id, batch_id, format, box_delta, bag_delta, reason, user_id)
+         VALUES ($1,$2,$3,$4,$5,'manual_count',$6)`,
+        [before.recipe_id, d.batch_id, d.format, boxDelta, bagDelta, req.user.id]
+      );
+      await refreshShipStatus(client, [d.batch_id]);
+      const after = await stockOf();
+      await logAudit(client, req.user.id, 'SET_STOCK', 'production_batch', d.batch_id,
+        { format: d.format, boxes: before.boxes_on_hand, bags: before.bags_on_hand },
+        { format: d.format, boxes: after.boxes_on_hand, bags: after.bags_on_hand }, req.ip);
+      return after;
     });
     res.json(result);
   } catch (e) { handleError(e, res, next); }

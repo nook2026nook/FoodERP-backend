@@ -125,6 +125,23 @@ test('a batch with shipments cannot be deleted', async () => {
   expect(res.status).toBe(409);
 });
 
+test('an administrator can set the counted boxes and bags on hand; others cannot', async () => {
+  const batch = await packedBatch('B-COUNT', '2026-10-25', 'Released', 10, 3);
+  const set = (token, body) => api().post('/api/inventory/set-stock').set(auth(token)).send({ batch_id: batch, format: '575g', ...body });
+
+  expect((await set(clerk, { boxes: 7, bags: 0 })).status).toBe(403);
+  const res = await set(admin, { boxes: 7, bags: 5 });
+  expect(res.status).toBe(200);
+  expect(await batchStock(batch)).toEqual({ boxes: 7, bags: 5 });
+  const adj = await pool.query("SELECT box_delta, bag_delta, reason FROM inventory_adjustments WHERE batch_id = $1", [batch]);
+  expect(adj.rows).toEqual([{ box_delta: -3, bag_delta: 2, reason: 'manual_count' }]);
+
+  // Same numbers again: nothing new recorded. Negative counts are refused.
+  await set(admin, { boxes: 7, bags: 5 });
+  expect((await pool.query('SELECT 1 FROM inventory_adjustments WHERE batch_id = $1', [batch])).rowCount).toBe(1);
+  expect((await set(admin, { boxes: -1, bags: 0 })).status).toBe(400);
+});
+
 describe('mapping an invoice line to a batch', () => {
   async function qboLine(invoice, qboItemId, quantity) {
     const s = await pool.query(
