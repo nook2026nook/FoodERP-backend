@@ -71,20 +71,22 @@ router.get('/ready-to-ship', async (req, res, next) => {
   } catch (e) { next(e); }
 });
 
-// GET /api/inventory/batches?recipe_id&format — per-batch finished stock (released and awaiting QA).
+// GET /api/inventory/batches?recipe_id&format&include_empty — per-batch finished stock (released and
+// awaiting QA). include_empty=true also lists batch sizes with 0 on hand (Ready to Ship stock counts).
 router.get('/batches', async (req, res, next) => {
   try {
     const q = z.object({
       recipe_id: z.string().uuid().optional(),
-      format: z.enum(['575g', '312g']).optional()
+      format: z.enum(['575g', '312g']).optional(),
+      include_empty: z.enum(['true', 'false']).optional()
     }).parse(req.query);
     const { rows } = await req.db.query(
       `SELECT s.*, r.name AS recipe_name, s.status = ANY($3::text[]) AS shippable
          FROM batch_finished_stock s JOIN recipes r ON r.id = s.recipe_id
         WHERE ($1::uuid IS NULL OR s.recipe_id = $1) AND ($2::text IS NULL OR s.format = $2)
-          AND (s.boxes_on_hand > 0 OR s.bags_on_hand > 0)
+          AND ($4 OR s.boxes_on_hand > 0 OR s.bags_on_hand > 0)
         ORDER BY r.name, s.format DESC, s.production_date, s.batch_number`,
-      [q.recipe_id || null, q.format || null, SHIPPABLE]
+      [q.recipe_id || null, q.format || null, SHIPPABLE, q.include_empty === 'true']
     );
     res.json(rows);
   } catch (e) { handleError(e, res, next); }
