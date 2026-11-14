@@ -140,6 +140,13 @@ test('an administrator can set the counted boxes and bags on hand; others cannot
   await set(admin, { boxes: 7, bags: 5 });
   expect((await pool.query('SELECT 1 FROM inventory_adjustments WHERE batch_id = $1', [batch])).rowCount).toBe(1);
   expect((await set(admin, { boxes: -1, bags: 0 })).status).toBe(400);
+
+  // Counted to zero: hidden from shipping's stock list, still listed for Ready to Ship so it can be edited back.
+  await set(admin, { boxes: 0, bags: 0 });
+  const ids = async (query) => (await api().get(`/api/inventory/batches${query}`).set(auth(admin))).body
+    .filter((r) => r.batch_id === batch).map((r) => r.format);
+  expect(await ids('')).toEqual([]);
+  expect(await ids('?include_empty=true')).toEqual(['575g', '312g']);
 });
 
 describe('mapping an invoice line to a batch', () => {
