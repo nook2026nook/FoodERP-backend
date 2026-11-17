@@ -44,16 +44,25 @@ router.post('/unlock', authenticate, unlockLimiter, async (req, res, next) => {
 });
 
 // POST /api/vault/change-passcode  (admin only)
-router.post('/change-passcode', authenticate, requireAdmin, async (req, res, next) => {
+// { currentPasscode | accountPassword, newPasscode }: a forgotten passcode is reset with the
+// administrator's own login password instead.
+router.post('/change-passcode', authenticate, requireAdmin, unlockLimiter, async (req, res, next) => {
   try {
-    const { currentPasscode, newPasscode } = z.object({
+    const { currentPasscode, accountPassword, newPasscode } = z.object({
       // Not needed the first time, before any passcode exists.
       currentPasscode: z.string().optional().default(''),
+      accountPassword: z.string().optional(),
       newPasscode: z.string().min(8, 'Use at least 8 characters')
     }).parse(req.body);
 
     const hash = await getVaultHash(req.db);
-    if (hash && !(await verifyPassword(hash, currentPasscode))) {
+    if (hash && accountPassword !== undefined) {
+      const { rows } = await req.db.query('SELECT password_hash FROM users WHERE id = $1', [req.user.id]);
+      if (!rows[0] || !(await verifyPassword(rows[0].password_hash, accountPassword))) {
+        await logAudit(req.db, req.user.id, 'VAULT_RESET_FAILED', 'vault', null, null, null, req.ip);
+        return res.status(401).json({ error: 'Your login password is incorrect' });
+      }
+    } else if (hash && !(await verifyPassword(hash, currentPasscode))) {
       return res.status(401).json({ error: 'Current passcode is incorrect' });
     }
 
@@ -63,7 +72,7 @@ router.post('/change-passcode', authenticate, requireAdmin, async (req, res, nex
        ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()`,
       [newHash]
     );
-    await logAudit(req.db, req.user.id, 'VAULT_PASSCODE_CHANGED', 'vault', null, null, null, req.ip);
+    await logAudit(req.db, req.user.id, accountPassword !== undefined ? 'VAULT_PASSCODE_RESET' : 'VAULT_PASSCODE_CHANGED', 'vault', null, null, null, req.ip);
     res.json({ message: 'Formulation vault passcode updated' });
   } catch (err) {
     if (err instanceof z.ZodError) return res.status(400).json({ error: 'Invalid input', details: err.errors });

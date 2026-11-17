@@ -193,3 +193,22 @@ describe('forced password change', () => {
     expect((await api().get('/api/items').set(auth(changed.body.token))).status).toBe(200);
   });
 });
+
+describe('vault passcode reset', () => {
+  test('administrator resets a forgotten passcode with their own login password', async () => {
+    const { hashPassword } = require('../utils/password');
+    const { setVaultPasscode } = require('./helpers');
+    await setVaultPasscode('forgotten-passcode');
+    await pool.query("UPDATE users SET password_hash = $1 WHERE email = 'administrator@test.local'", [await hashPassword('admin-login-123')]);
+
+    const wrong = await api().post('/api/vault/change-passcode').set(auth(admin)).send({ accountPassword: 'nope', newPasscode: 'new-pass-123' });
+    expect(wrong.status).toBe(401);
+    const asOperator = await api().post('/api/vault/change-passcode').set(auth(operator)).send({ accountPassword: 'admin-login-123', newPasscode: 'new-pass-123' });
+    expect(asOperator.status).toBe(403);
+
+    const ok = await api().post('/api/vault/change-passcode').set(auth(admin)).send({ accountPassword: 'admin-login-123', newPasscode: 'new-pass-123' });
+    expect(ok.status).toBe(200);
+    expect((await api().post('/api/vault/unlock').set(auth(admin)).send({ passcode: 'new-pass-123' })).status).toBe(200);
+    expect((await api().post('/api/vault/unlock').set(auth(admin)).send({ passcode: 'forgotten-passcode' })).status).toBe(401);
+  });
+});
