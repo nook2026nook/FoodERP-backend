@@ -175,6 +175,28 @@ test('admin can release and re-allocate a line to a chosen batch', async () => {
   expect(await boxesLeft(ids.new)).toBe(1);
 });
 
+test('an invoice edited in QuickBooks updates its lines: new quantity re-allocated, deleted line removed', async () => {
+  await packedBatch('B-EDIT', '2026-10-15', 20, 0);
+  await syncInvoices(pool, fakeQbo({ invoices: [invoice(50, [{ item: '10', qty: 2 }, { item: '10', qty: 1 }])], changed: [] }));
+  const shipped = async () => (await pool.query(
+    `SELECT l.qbo_line_id, l.quantity, l.allocation_status, COALESCE(SUM(a.boxes), 0)::int AS boxes
+       FROM shipment_lines l JOIN shipments s ON s.id = l.shipment_id LEFT JOIN shipment_allocations a ON a.line_id = l.id
+      WHERE s.invoice_number = 'INV-50' GROUP BY l.id ORDER BY l.qbo_line_id`)).rows;
+  expect(await shipped()).toEqual([
+    { qbo_line_id: '1', quantity: 2, allocation_status: 'allocated', boxes: 2 },
+    { qbo_line_id: '2', quantity: 1, allocation_status: 'allocated', boxes: 1 }
+  ]);
+
+  // In QuickBooks: line 1 goes from 2 to 12 boxes, line 2 is deleted.
+  const edited = { invoices: [invoice(50, [{ item: '10', qty: 12 }])], changed: [] };
+  const summary = await syncInvoices(pool, fakeQbo(edited));
+  expect(summary).toMatchObject({ updated: 1, removed_lines: 1, errors: [] });
+  expect(await shipped()).toEqual([{ qbo_line_id: '1', quantity: 12, allocation_status: 'allocated', boxes: 12 }]);
+
+  const again = await syncInvoices(pool, fakeQbo(edited));
+  expect(again).toMatchObject({ updated: 0, removed_lines: 0, skipped: 1 });
+});
+
 test('status reports the connection; a clerk can see it but cannot change mappings', async () => {
   const status = await api().get('/api/qbo/status').set(auth(clerk));
   expect(status.status).toBe(200);
@@ -193,7 +215,7 @@ test('sync start date: earlier invoices are ignored, already-synced ones can be 
   // INV-1 and INV-4 were shipped 2026-10-20; a start date after that removes them.
   const set = await api().put('/api/qbo/sync-start-date').set(auth(admin)).send({ start_date: '2026-10-21', remove_earlier: true });
   expect(set.status).toBe(200);
-  expect(set.body).toEqual({ start_date: '2026-10-21', end_date: null, removed: 2 });
+  expect(set.body).toEqual({ start_date: '2026-10-21', end_date: null, removed: 3 });
   expect(await lines()).toEqual([]);
   expect((await pool.query('SELECT last_sync_at FROM qbo_auth_tokens')).rows[0].last_sync_at).toBeNull();
 
