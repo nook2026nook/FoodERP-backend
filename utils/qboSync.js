@@ -8,6 +8,8 @@
  * - Paged with STARTPOSITION / MAXRESULTS.
  * - One transaction per invoice; one failure is logged and the sync carries on.
  * - Idempotent per invoice LINE (unique shipment_id + qbo_line_id): running twice adds nothing.
+ * - A line edited in QuickBooks (quantity or item) is updated and allocated again, the batches it
+ *   used first; a line deleted there (or set to 0) is removed. Its stock returns to the batches.
  * - Items map to recipe + format + bag/box through qbo_item_map. Unmapped items are
  *   saved as unallocated lines for an admin, never dropped and never guessed.
  * - Mapped lines are allocated oldest released batch first, split across batches;
@@ -17,7 +19,7 @@
  * `qbo` is { query(sql), changedInvoices(sinceIso) } (utils/qboClient.api, or a fake in tests).
  */
 const { withTransaction } = require('../db');
-const { allocateLine, lockBatches, refreshShipStatus } = require('./finishedStock');
+const { allocateLine, releaseLine, lockBatches, refreshShipStatus } = require('./finishedStock');
 const { logAudit } = require('./audit');
 
 const PAGE_SIZE = 100;
@@ -81,7 +83,8 @@ async function removeInvoice(client, qboInvoiceId, reason, userId) {
 
 /** Store one invoice; returns per-line counts. */
 async function storeInvoice(client, inv, userId) {
-  const counts = { created: 0, skipped: 0, unmapped: 0, partial: 0, changed: [] , rounded: [] };
+  const counts = { created: 0, skipped: 0, updated: 0, removed_lines: 0, unmapped: 0, partial: 0, changed: [], rounded: [] };
+  const seen = []; // QuickBooks line ids still on the invoice
   const invoiceNumber = inv.DocNumber || `QBO-${inv.Id}`;
   const { rows: [shipment] } = await client.query(
     `INSERT INTO shipments (invoice_number, customer_name, shipped_at, source, qbo_invoice_id, qbo_customer_id, qbo_sync_status)
@@ -104,36 +107,79 @@ async function storeInvoice(client, inv, userId) {
     if (quantity !== rawQty) counts.rounded.push(`${invoiceNumber}: ${rawQty} rounded to ${quantity}`);
     if (quantity <= 0) continue;
     const lineId = String(line.Id || line.LineNum);
-
-    const existing = await client.query(
-      'SELECT id, quantity FROM shipment_lines WHERE shipment_id = $1 AND qbo_line_id = $2', [shipment.id, lineId]
-    );
-    if (existing.rows.length) {
-      counts.skipped++;
-      if (existing.rows[0].quantity !== quantity) {
-        counts.changed.push(`${invoiceNumber} line ${lineId}: quantity changed in QuickBooks from ${existing.rows[0].quantity} to ${quantity}; review it`);
-      }
-      continue;
-    }
+    seen.push(lineId);
 
     const itemId = detail.ItemRef?.value ? String(detail.ItemRef.value) : null;
     const description = detail.ItemRef?.name || line.Description || 'QuickBooks item';
+    const unitPrice = detail.UnitPrice != null ? Number(detail.UnitPrice) : null;
     const map = itemId
       ? (await client.query('SELECT recipe_id, format, unit_type FROM qbo_item_map WHERE qbo_item_id = $1', [itemId])).rows[0]
       : null;
+
+    const { rows: [old] } = await client.query(
+      'SELECT * FROM shipment_lines WHERE shipment_id = $1 AND qbo_line_id = $2', [shipment.id, lineId]
+    );
+    if (old) {
+      if (old.quantity === quantity && old.qbo_item_id === itemId) {
+        counts.skipped++;
+        continue;
+      }
+      // Edited in QuickBooks: same item keeps its product and batches (they are tried first);
+      // another item takes that item's mapping.
+      const sameItem = old.qbo_item_id === itemId;
+      const prev = sameItem ? (await client.query(
+        `SELECT a.batch_id FROM shipment_allocations a JOIN production_batches b ON b.id = a.batch_id
+          WHERE a.line_id = $1 ORDER BY b.production_date, b.batch_number`, [old.id]
+      )).rows.map(r => r.batch_id) : [];
+      await releaseLine(client, old.id);
+      const product = sameItem && old.recipe_id ? old : { recipe_id: map?.recipe_id || null, format: map?.format || null, unit_type: map?.unit_type || null };
+      await client.query(
+        `UPDATE shipment_lines SET quantity = $1, unit_price = $2, qbo_item_id = $3, product_description = $4,
+                recipe_id = $5, format = $6, unit_type = $7 WHERE id = $8`,
+        [quantity, unitPrice, itemId, description, product.recipe_id, product.format, product.unit_type, old.id]
+      );
+      counts.updated++;
+      counts.changed.push(`${invoiceNumber} line ${lineId}: updated from QuickBooks (${old.quantity} -> ${quantity}${sameItem ? '' : `, item ${description}`})`);
+      await logAudit(client, userId, 'QBO_LINE_UPDATE', 'shipment_line', old.id,
+        { quantity: old.quantity, qbo_item_id: old.qbo_item_id }, { quantity, qbo_item_id: itemId }, null);
+      if (!product.recipe_id || !product.format || !product.unit_type) { counts.unmapped++; continue; }
+      for (const batchId of prev) {
+        try {
+          await allocateLine(client, old.id, { batchId, userId, strict: false, method: 'fifo' });
+        } catch (e) {
+          if (e.status !== 409) throw e; // that batch has nothing left; FIFO below covers the rest
+        }
+      }
+      const result = await allocateLine(client, old.id, { userId, strict: false, method: 'fifo' });
+      if (result.status !== 'allocated') counts.partial++;
+      continue;
+    }
 
     const { rows: [saved] } = await client.query(
       `INSERT INTO shipment_lines (shipment_id, recipe_id, format, unit_type, quantity, unit_price,
                                    qbo_line_id, qbo_item_id, product_description, allocation_status)
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,'unallocated') RETURNING id`,
       [shipment.id, map?.recipe_id || null, map?.format || null, map?.unit_type || null, quantity,
-       detail.UnitPrice != null ? Number(detail.UnitPrice) : null, lineId, itemId, description]
+       unitPrice, lineId, itemId, description]
     );
     counts.created++;
     if (!map) { counts.unmapped++; continue; }
     const result = await allocateLine(client, saved.id, { userId, strict: false, method: 'fifo' });
     if (result.status !== 'allocated') counts.partial++;
   }
+
+  // Lines deleted in QuickBooks (or set to 0). Lines added by hand in the ERP have no qbo_line_id.
+  const { rows: gone } = await client.query(
+    `SELECT * FROM shipment_lines WHERE shipment_id = $1 AND qbo_line_id IS NOT NULL AND NOT (qbo_line_id = ANY($2::text[]))`,
+    [shipment.id, seen]
+  );
+  for (const g of gone) {
+    await releaseLine(client, g.id);
+    await client.query('DELETE FROM shipment_lines WHERE id = $1', [g.id]);
+    await logAudit(client, userId, 'QBO_LINE_REMOVE', 'shipment_line', g.id, g, { reason: 'Removed from the QuickBooks invoice' }, null);
+    counts.changed.push(`${invoiceNumber} line ${g.qbo_line_id}: removed (no longer on the QuickBooks invoice)`);
+  }
+  counts.removed_lines = gone.length;
   return counts;
 }
 
@@ -172,7 +218,7 @@ async function syncInvoices(db, qbo, { userId = null } = {}) {
 
   const summary = {
     mode, start_date: startDate, end_date: endDate, invoices: invoices.length, created: 0, skipped: 0, unmapped: 0,
-    partial: 0, removed: 0, before_start: 0, after_end: 0, errors: [], notes: []
+    updated: 0, removed_lines: 0, partial: 0, removed: 0, before_start: 0, after_end: 0, errors: [], notes: []
   };
 
   for (const inv of invoices) {
@@ -196,6 +242,8 @@ async function syncInvoices(db, qbo, { userId = null } = {}) {
         const c = await storeInvoice(client, inv, userId);
         summary.created += c.created;
         summary.skipped += c.skipped;
+        summary.updated += c.updated;
+        summary.removed_lines += c.removed_lines;
         summary.unmapped += c.unmapped;
         summary.partial += c.partial;
         summary.notes.push(...c.changed, ...c.rounded);
